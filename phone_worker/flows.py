@@ -54,6 +54,14 @@ class Home:
         """'Error / A communication error has occurred' 같은 오류 창이면 주황 OK를 눌러 닫음. 닫았으면 True."""
         if img is None:
             return False
+        if V.match(img, "ph_other_device")[0]:
+            # 'You are logged on with a separate device. Do you want to log on using this device?' — 스위치↔휴대폰을 짧은 간격으로
+            # 오가면 가끔 뜸 → 오른쪽 주황 OK (교환 확인 창으로 잘못 알아 '취소' 자리를 누르며 맴돌던 문제)
+            btns = [b for b in V.orange_buttons(img) if b[0] > 540]
+            x, y = btns[-1] if btns else (761, 1211)
+            self.log(f"다른 기기 로그인 확인 창 → OK ({x},{y})"); self.save_shot(img, "other_device")
+            self.tap(x, y, 2.0)
+            return True
         if V.match(img, "ph_error")[0]:
             btns = V.orange_buttons(img)
             x, y = btns[-1] if btns else (540, 1330)
