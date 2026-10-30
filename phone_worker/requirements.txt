@@ -1,0 +1,5 @@
+opencv-python>=4.9
+numpy>=1.26
+# OCR (둘 중 하나, 선택): 
+# paddleocr paddlepaddle        ← 한글 정확도 높음
+# pytesseract                   ← + 시스템에 tesseract-ocr, tesseract-ocr-kor 설치

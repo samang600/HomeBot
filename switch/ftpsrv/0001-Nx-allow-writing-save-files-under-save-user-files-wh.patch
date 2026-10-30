@@ -1,0 +1,66 @@
+From 5a914b8563ed195e5dffba29cec85d60eee3b51e Mon Sep 17 00:00:00 2001
+From: HomeBot <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 01:10:33 +0900
+Subject: [PATCH] Nx: allow writing save files under /save:/<user>/files when
+ save_writable=1
+
+The open() check allowed writes only for the zips view, while write() rejects zips,
+so STOR to a save file always failed with EROFS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01ApNnwNJLWqJBxvP2KWkVrG
+---
+ .github/workflows/build_switch.yml | 17 +++++++++++++++--
+ src/platform/nx/vfs/vfs_nx_save.c  |  2 +-
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/.github/workflows/build_switch.yml b/.github/workflows/build_switch.yml
+index 982b702..a0c1d5f 100644
+--- a/.github/workflows/build_switch.yml
++++ b/.github/workflows/build_switch.yml
+@@ -1,10 +1,11 @@
+ name: build_switch
+ 
+ on:
++  workflow_dispatch:
+   push:
+-    branches: [ "master" ]
++    branches: [ "master", "main" ]
+   pull_request:
+-    branches: [ "master" ]
++    branches: [ "master", "main" ]
+ 
+ jobs:
+   build:
+@@ -29,3 +30,15 @@ jobs:
+ 
+     - name: Build
+       run: cmake --build --preset ${{ matrix.preset }} --parallel 4
++
++    # 스위치용 sysmodule을 SD 카드에 바로 덮어쓸 수 있는 모양으로 묶어 올림
++    - name: Package sysmodule
++      run: |
++        mkdir -p out/atmosphere/contents out/config/ftpsrv
++        cp -r build/switch/420000000000011B out/atmosphere/contents/
++        cp assets/config.ini.template out/config/ftpsrv/
++
++    - uses: actions/upload-artifact@v4
++      with:
++        name: ftpsrv-sysmod-savefix
++        path: out
+diff --git a/src/platform/nx/vfs/vfs_nx_save.c b/src/platform/nx/vfs/vfs_nx_save.c
+index ee8ed72..dc26815 100644
+--- a/src/platform/nx/vfs/vfs_nx_save.c
++++ b/src/platform/nx/vfs/vfs_nx_save.c
+@@ -597,7 +597,7 @@ static void rescan_users(void) {
+ static int vfs_save_open(void* user, const char* path, enum FtpVfsOpenMode mode) {
+     struct VfsSaveFile* f = user;
+     f->data = get_type(path);
+-    if (mode != FtpVfsOpenMode_READ && (!g_writable || f->data.type != SaveDirType_ZipApp)) {
++    if (mode != FtpVfsOpenMode_READ && (!g_writable || f->data.type != SaveDirType_FileApp)) {
+         errno = EROFS;
+         return -1;
+     }
+-- 
+2.43.0
+

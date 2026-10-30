@@ -1,0 +1,8 @@
+__pycache__/
+bin/
+obj/
+data/
+shots/
+config.json
+gui/gui_settings.json
+out/

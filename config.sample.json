@@ -1,0 +1,30 @@
+{
+  // 관리 창의 [🧭 설치 마법사]가 이 파일을 config.json으로 복사해 채웁니다. 손으로 고쳐도 됩니다.
+  // 봇 토큰은 파일에 쓰지 않고 윈도우 사용자 환경 변수 DISCORD_TOKEN에 둡니다.
+  "Discord": { "TokenEnv": "DISCORD_TOKEN", "GuildId": 0, "AdminIds": [], "ChannelId": 0, "TestGuildId": 0, "TestOnly": false },
+  "Switch": {
+    "IP": "192.168.0.10", "Port": 6000,      // sys-botbase
+    "FtpPort": 21, "FtpUser": "", "FtpPass": "",   // ftpsrv (anon=1이면 사용자·비밀번호 비움)
+    "SaveUser": "",                          // 게임 세이브 주인 스위치 사용자 이름
+    "GameUserIndex": 0,                      // 그 사용자의 순서 (0부터)
+    "HomeUserIndex": 0,                      // HOME 계정 1의 스위치 사용자 순서 (Home.Accounts[0]이 있으면 그 값)
+    "Games": [ "VL" ],                       // 다룰 게임: VL(스칼렛·바이올렛) SH(소드·실드) BD(BDSP) GP(레츠고) PLA ZA
+    "Game": "VL",                            // 처음 시작할 게임
+    "TransferBox": 1,                        // 게임 세이브에서 포켓몬을 넣고 HOME으로 옮길 박스 (비워 둘 것)
+    "ScreenOff": false,
+    "Trainer": { "OT": "홈봇", "TID": 123456, "SID": 1234, "Gender": 0, "Language": "ko" },
+    "MacroDir": "macros"
+  },
+  "Home": {
+    "Mode": "free",
+    // HOME 계정 1~3개: 스위치 사용자 순서 + 같은 계정으로 로그인한 휴대폰(adb 주소). AndroidUser는 MuMu 앱 복제본일 때만
+    "Accounts": [ { "SwitchUser": 0, "Phone": "127.0.0.1:16384" } ]
+  },
+  "Phone": { "Enabled": true, "Url": "http://127.0.0.1:8765", "TimeoutSec": 300 },
+  "Limits": { "PerUserDaily": 5, "PerUserActive": 1, "ClaimTimeoutSec": 600, "GenSeconds": 90, "MoveBatchMax": 12 },
+  "Vote": { "Enabled": true, "Needed": 5, "CooldownHours": 2, "ChannelId": 0 },
+  // 게임 동시 운영 (HOME 계정이 2개 이상일 때): 기본 게임 신청이 적어 계정이 남으면 Priority 순서로 다른 게임을 같이 받고, 많아지면 다시 마감
+  "Hybrid": { "Enabled": true, "Priority": [ "ZA", "VL", "SH", "PLA" ], "PerAccountPerHour": 28, "OpenAfterMinutes": 15, "CloseAfterMinutes": 3, "NoticeMinutes": 3, "MinOpenMinutes": 30 },
+  "DefaultRoute": "home_gts",
+  "DataDir": "data"
+}

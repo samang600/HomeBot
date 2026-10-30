@@ -1,0 +1,50 @@
+{
+ "name": "home_save",
+ "description": "스위치 HOME 앱: 저장(+) → 저장 완료 → HOME 버튼으로 스위치 메뉴까지. 세이브 모드라 게임은 켜지 않음.",
+ "steps": [
+  {
+   "expect": "home_error",
+   "timeout": 400,
+   "fail": "goto:no_err",
+   "quiet": true,
+   "note": "HOME 오류 창이 떠 있으면 OK로 닫음"
+  },
+  {
+   "click": "A",
+   "wait": 2500
+  },
+  {
+   "label": "no_err"
+  },
+  {
+   "click": "PLUS",
+   "wait": 400
+  },
+  {
+   "expect": "home_save_confirm",
+   "timeout": 6000,
+   "fail": "goto:skip_save",
+   "quiet": true,
+   "note": "타이틀 화면 등 저장할 게 없으면 바로 종료로"
+  },
+  {
+   "click": "A",
+   "wait": 400
+  },
+  {
+   "expect": "home_saved",
+   "timeout": 90000,
+   "note": "저장 약 15초"
+  },
+  {
+   "sleep": 700
+  },
+  {
+   "label": "skip_save"
+  },
+  {
+   "click": "HOME",
+   "wait": 1500
+  }
+ ]
+}

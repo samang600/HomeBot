@@ -1,0 +1,10 @@
+<Solution>
+  <Project Path="deps/PKHeX-Mobile-KR/HOMELive/HomeLive.Core/HomeLive.Core.csproj" />
+  <Project Path="deps/PKHeX-Mobile-KR/HOMELive/HomeLive.DeviceExecutor/HomeLive.DeviceExecutor.csproj" />
+  <Project Path="deps/PKHeX-Mobile-KR/PKHeX-Core-Dev/PKHeX.Core/PKHeX.Core.csproj" />
+  <Project Path="deps/PKHeX-Mobile-KR/PKHeX-Plugins/PKHeX.Core.AutoMod/PKHeX.Core.AutoMod.csproj" />
+  <Project Path="deps/PKHeX-Mobile-KR/PKHeX-Plugins/PKHeX.Core.Injection/PKHeX.Core.Injection.csproj" />
+  <Project Path="deps/PKHeX-Mobile-KR/Shared/PKHeXKR.Gen/PKHeXKR.Gen.csproj" />
+  <Project Path="HomeBot.Core/HomeBot.Core.csproj" />
+  <Project Path="HomeBot.Discord/HomeBot.Discord.csproj" />
+</Solution>

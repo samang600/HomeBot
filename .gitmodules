@@ -1,0 +1,3 @@
+[submodule "deps/PKHeX-Mobile-KR"]
+	path = deps/PKHeX-Mobile-KR
+	url = https://github.com/samang600/PKHeX-Mobile-KR

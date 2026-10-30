@@ -1,0 +1,7 @@
+{"name": "home_discard", "description": "스위치에 HOME 앱(또는 다른 소프트웨어)이 켜진 채 멈춰 있을 때 저장하지 않고 닫음: HOME 버튼 → X(소프트웨어 종료) → 종료. 옮기다 멈춘 반쪽 상태를 버려 봇 기록(아직 게임 박스에 있음)과 맞춤.", "steps": [
+ {"click": "HOME", "wait": 1800, "note": "스위치 HOME 메뉴로"},
+ {"click": "X", "wait": 1200, "note": "켜진 소프트웨어 종료 창"},
+ {"expect": "sw_close_dialog", "timeout": 3000, "fail": "goto:end", "quiet": true, "note": "켜진 소프트웨어가 없으면 창이 안 뜸 → 그냥 끝"},
+ {"click": "A", "wait": 2500, "note": "종료 (저장하지 않은 내용은 버려짐)"},
+ {"label": "end"}
+]}

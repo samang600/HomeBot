@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <NoWarn>$(NoWarn);CS1998;CS8632</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\deps\PKHeX-Mobile-KR\Shared\PKHeXKR.Gen\PKHeXKR.Gen.csproj" />
+    <ProjectReference Include="..\deps\PKHeX-Mobile-KR\PKHeX-Plugins\PKHeX.Core.Injection\PKHeX.Core.Injection.csproj" />
+    <ProjectReference Include="..\deps\PKHeX-Mobile-KR\HOMELive\HomeLive.Core\HomeLive.Core.csproj" />
+    <ProjectReference Include="..\deps\PKHeX-Mobile-KR\HOMELive\HomeLive.DeviceExecutor\HomeLive.DeviceExecutor.csproj" />
+    <Reference Include="SysBot.Base"><HintPath>..\deps\PKHeX-Mobile-KR\HOMELive\HomeLive.DeviceExecutor\deps\SysBot.Base.dll</HintPath></Reference>
+  </ItemGroup>
+  <ItemGroup>
+  </ItemGroup>
+</Project>

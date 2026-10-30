@@ -1,0 +1,49 @@
+{
+"name": "home_close",
+"description": "세이브 모드: home_save 뒤(스위치 메뉴, HOME 일시정지) HOME 앱을 닫음. 게임은 켜지 않음.",
+"steps": [
+{
+"click": "X",
+"wait": 1200,
+"note": "스위치 메뉴: 켜진 HOME 앱 종료 창 (세이브를 ftpsrv로 다시 쓰려면 HOME이 닫혀 있어야 함)"
+},
+{
+"expect": "sw_close_dialog",
+"timeout": 3000,
+"fail": "goto:retry",
+"quiet": true
+},
+{
+"goto": "close_ok"
+},
+{
+"label": "retry"
+},
+{
+"click": "HOME",
+"wait": 1500,
+"note": "메뉴가 아니었으면 메뉴로"
+},
+{
+"click": "X",
+"wait": 1200
+},
+{
+"expect": "sw_close_dialog",
+"timeout": 3000,
+"fail": "goto:end",
+"quiet": true
+},
+{
+"label": "close_ok"
+},
+{
+"click": "A",
+"wait": 2500,
+"note": "종료"
+},
+{
+"label": "end"
+}
+]
+}
