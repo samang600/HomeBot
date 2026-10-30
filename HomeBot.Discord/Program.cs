@@ -590,8 +590,7 @@ _ = Task.Run(async () =>
                     else if (p[0] == "cancel" && p.Length == 2 && long.TryParse(p[1], out var cid)) res = await orch.AdminCancelAsync(cid);
                     else if (p[0] == "done" && p.Length == 2 && long.TryParse(p[1], out var did)) res = await orch.AdminDoneAsync(did);
                     else if (p[0] == "requeue" && p.Length == 2 && long.TryParse(p[1], out var rid)) res = await orch.AdminRequeueAsync(rid);
-                    else if (p[0] == "home_user2" && p.Length == 2) res = orch.SetHomeUser2(p[1]);
-                    else if (p[0] == "home_user3" && p.Length == 2) res = orch.SetHomeUser3(p[1]);
+                    else if (p[0].StartsWith("home_user") && int.TryParse(p[0]["home_user".Length..], out var hk) && p.Length == 2) res = orch.SetHomeUser(hk, p[1]);
                     else if (c is "intake:close" or "intake_close") res = orch.SetIntake(false);
                     else if (c is "intake:open" or "intake_open") res = orch.SetIntake(true);
                     else if (c is "phone_parallel:on" or "phone_parallel:off") res = orch.SetPhoneParallel(c.EndsWith("on"));

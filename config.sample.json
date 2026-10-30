@@ -17,7 +17,7 @@
   },
   "Home": {
     "Mode": "free",
-    // HOME 계정 1~3개: 스위치 사용자 순서 + 같은 계정으로 로그인한 휴대폰(adb 주소). AndroidUser는 MuMu 앱 복제본일 때만
+    // HOME 계정 1~5개: 스위치 사용자 순서 + 같은 계정으로 로그인한 휴대폰(adb 주소). AndroidUser는 MuMu 앱 복제본일 때만
     "Accounts": [ { "SwitchUser": 0, "Phone": "127.0.0.1:16384" } ]
   },
   "Phone": { "Enabled": true, "Url": "http://127.0.0.1:8765", "TimeoutSec": 300 },

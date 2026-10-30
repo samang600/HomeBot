@@ -45,23 +45,29 @@ public sealed class Orchestrator
     /// <summary>GTS 검색 결과가 없을 때 신청자에게 보낼 안내 (디스코드 쪽이 [수정][취소] 버튼을 붙여 DM). null이면 글만 보냄</summary>
     public Func<Order, string, Task> OnNoResult { get; set; }
     private readonly SemaphoreSlim homeLock = new(1, 1);   // 게임 전환용 (신청이 하나도 없을 때만)
-    // ---- HOME 계정 2개 번갈아 쓰기: 1 = 기본(휴대폰 #N1), 2 = 두 번째(휴대폰 #N2). 계정마다 10마리씩 차례로 채우고, 같은 계정은 스위치·휴대폰이 동시에 쓰지 않음
-    private readonly SemaphoreSlim[] acctLock = [new(1, 1), new(1, 1), new(1, 1), new(1, 1)];
+    // ---- HOME 계정 여러 개(최대 5) 번갈아 쓰기: 계정마다 스위치 사용자 + 휴대폰 하나. 계정마다 10마리씩 차례로 채우고, 같은 계정은 스위치·휴대폰이 동시에 쓰지 않음
+    public const int MaxAccounts = HomeAccountCfg.Max;
+    private readonly SemaphoreSlim[] acctLock = Enumerable.Range(0, MaxAccounts + 1).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> acctHoldUntil = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, int> acctHoldCount = new();
-    // 두·세 번째 계정의 스위치 사용자 순서 (없으면 -1). 설정 Home.Accounts가 있으면 그 값, 없으면 관리 명령 home_user2/3으로 정한 값
-    public int HomeUser2 => cfg.Home.Accounts.Count >= 2 ? cfg.Home.Accounts[1].SwitchUser : cfg.Home.Accounts.Count == 1 ? -1 : int.TryParse(db.Get("home_user2"), out var v) ? v : -1;
-    public int HomeUser3 => cfg.Home.Accounts.Count >= 3 ? cfg.Home.Accounts[2].SwitchUser : cfg.Home.Accounts.Count is 1 or 2 ? -1 : int.TryParse(db.Get("home_user3"), out var v) ? v : -1;
-    public int Accounts => HomeUser2 < 0 ? 1 : HomeUser3 < 0 ? 2 : 3;
-    private int? UserOf(int acct) => acct == 2 ? HomeUser2 : acct == 3 ? HomeUser3 : null;
-    private int AcctOf(long orderId) => int.TryParse(db.Get($"acct:{orderId}"), out var a) && a >= 1 && a <= 3 ? a : 1;
-    private int PoolAcct(long poolId) => int.TryParse(db.Get($"pacct:{poolId}"), out var a) && a >= 1 && a <= 3 ? a : 1;
+    // n번째 계정(2~5)의 스위치 사용자 순서 (없으면 -1). 설정 Home.Accounts가 있으면 그 값, 없으면 관리 명령 home_user<n>으로 정한 값
+    public int HomeUserOf(int n) => n <= 1 ? cfg.Switch.HomeUserIndex
+        : cfg.Home.Accounts.Count >= n ? cfg.Home.Accounts[n - 1].SwitchUser
+        : cfg.Home.Accounts.Count > 0 ? -1
+        : int.TryParse(db.Get($"home_user{n}"), out var v) ? v : -1;
+    public int HomeUser2 => HomeUserOf(2);
+    public int HomeUser3 => HomeUserOf(3);
+    /// <summary>쓰는 HOME 계정 수 (1~5): 2번부터 차례로, 비어 있는 번호에서 끊음</summary>
+    public int Accounts { get { int n = 1; while (n < MaxAccounts && HomeUserOf(n + 1) >= 0) n++; return n; } }
+    private int? UserOf(int acct) => acct >= 2 ? HomeUserOf(acct) : null;
+    private int AcctOf(long orderId) => int.TryParse(db.Get($"acct:{orderId}"), out var a) && a >= 1 && a <= MaxAccounts ? a : 1;
+    private int PoolAcct(long poolId) => int.TryParse(db.Get($"pacct:{poolId}"), out var a) && a >= 1 && a <= MaxAccounts ? a : 1;
     private List<Order> HomeOf(int a) => db.Orders(OrderStatus.InHome, OrderStatus.Trading).Where(o => AcctOf(o.Id) == a).ToList();
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, bool> freshOf = new(new Dictionary<int, bool> { [1] = true, [2] = true, [3] = true });
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> prelaunchOf = new(new Dictionary<int, DateTime> { [1] = DateTime.MinValue, [2] = DateTime.MinValue, [3] = DateTime.MinValue });
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, bool> freshOf = new(Enumerable.Range(1, MaxAccounts).ToDictionary(k => k, _ => true));
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> prelaunchOf = new(Enumerable.Range(1, MaxAccounts).ToDictionary(k => k, _ => DateTime.MinValue));
     /// <summary>두 계정 휴대폰 교환을 동시에 (MuMu에서 두 앱 창이 따로 떠 있어야 함). 관리 창 명령 phone_parallel:on/off</summary>
     public bool PhoneParallel => Accounts > 1 && db.Get("phone_parallel") == "1";
-    public string SetPhoneParallel(bool on) { db.Set("phone_parallel", on ? "1" : "0"); return on ? "휴대폰 두 계정 동시 교환 켬" : "휴대폰 두 계정 번갈아 교환"; }
+    public string SetPhoneParallel(bool on) { db.Set("phone_parallel", on ? "1" : "0"); return on ? "휴대폰 계정들 동시 교환 켬" : "휴대폰 계정들 번갈아 교환"; }
     /// <summary>운영자: 스위치 버튼을 차례로 누름 (엉뚱한 화면에 갇혔을 때). 예: B,B,HOME</summary>
     public async Task<string> SwitchKeysAsync(string keys)
     {
@@ -88,17 +94,14 @@ public sealed class Orchestrator
         return "스위치 화면 저장: " + p;
     }
 
-    public string SetHomeUser2(string v)
+    /// <summary>관리 명령 home_user&lt;k&gt;:&lt;n|off&gt; — 설정 Home.Accounts가 비었을 때만 쓰임 (예전 방식)</summary>
+    public string SetHomeUser(int k, string v)
     {
-        if (v is "off" or "-1") { db.Set("home_user2", "-1"); return "두 번째 HOME 계정 끔"; }
-        if (!int.TryParse(v, out var n) || n < 0 || n > 7) return "home_user2: 0~7 또는 off";
-        db.Set("home_user2", n.ToString()); return $"두 번째 HOME 계정: 스위치 사용자 {n}번째(0부터) · 휴대폰 #N2";
-    }
-    public string SetHomeUser3(string v)
-    {
-        if (v is "off" or "-1") { db.Set("home_user3", "-1"); return "세 번째 HOME 계정 끔"; }
-        if (!int.TryParse(v, out var n) || n < 0 || n > 7) return "home_user3: 0~7 또는 off";
-        db.Set("home_user3", n.ToString()); return $"세 번째 HOME 계정: 스위치 사용자 {n}번째(0부터) · 휴대폰 #N3";
+        if (k < 2 || k > MaxAccounts) return $"home_user{k}: 계정 번호는 2~{MaxAccounts}";
+        if (cfg.Home.Accounts.Count > 0) return "설정 Home.Accounts가 있어 이 명령은 쓰이지 않습니다 (설치 마법사에서 계정을 고치세요)";
+        if (v is "off" or "-1") { db.Set($"home_user{k}", "-1"); return $"{k}번째 HOME 계정 끔"; }
+        if (!int.TryParse(v, out var n) || n < 0 || n > 7) return $"home_user{k}: 0~7 또는 off";
+        db.Set($"home_user{k}", n.ToString()); return $"{k}번째 HOME 계정: 스위치 사용자 {n}번째(0부터)";
     }
     private bool paused; private DateTime? pausedAt;
     /// <summary>일시정지. 풀릴 때 HOME 차례 신청들의 시간 제한을 멈춰 있던 만큼 늘려 줌 (봇 쪽 고장으로 사용자 시간이 깎이지 않게)</summary>
@@ -347,7 +350,7 @@ public sealed class Orchestrator
             if (now < openAt) return;
             db.Set("side_plan", "");
             var l = SideGames; l.Add(pg); SetSides(l);
-            foreach (var a in Enumerable.Range(1, 3)) if (a != pa && NormOrNull(db.Get($"acct_game:{a}")) == pg) db.Set($"acct_game:{a}", "");   // 예전 기록이 남아 다른 계정까지 끌려가지 않게
+            foreach (var a in Enumerable.Range(1, MaxAccounts)) if (a != pa && NormOrNull(db.Get($"acct_game:{a}")) == pg) db.Set($"acct_game:{a}", "");   // 예전 기록이 남아 다른 계정까지 끌려가지 않게
             db.Set($"acct_game:{pa}", pg); db.Set($"side_since:{pg}", now.ToString("o")); db.Set($"side_closing:{pg}", "");
             log($"동시 운영: {GameKo(pg)} 신청 받기 시작 (계정 {pa} · {GameKo(Game)} 계정 {string.Join(",", AcctsOf(Game))})");
             return;
@@ -893,17 +896,15 @@ public sealed class Orchestrator
         // 켜질 때 교대 시각이 한참 지나 있으면(봇을 오래 꺼 뒀던 경우) 지금부터 새 주기로 — 켜자마자 게임을 바꾸지 않게
         if (Timed && DateTime.UtcNow - GameSince > Period) { db.Set("game_since", DateTime.UtcNow.ToString("o")); log("교대 주기를 지금부터 새로 셉니다"); }
         // 동시 운영 기록 정리: 같이 받는 게임이 아닌데 남은 계정 배정은 지움 (나중에 그 게임을 다시 열 때 엉뚱한 계정이 끌려가지 않게)
-        foreach (var an in Enumerable.Range(1, 3)) if (NormOrNull(db.Get($"acct_game:{an}")) is { } ag && !SideGames.Contains(ag)) db.Set($"acct_game:{an}", "");
+        foreach (var an in Enumerable.Range(1, MaxAccounts)) if (NormOrNull(db.Get($"acct_game:{an}")) is { } ag && !SideGames.Contains(ag)) db.Set($"acct_game:{an}", "");
         if (SwitchHold) log("스위치 쉬기 중이라 시작 시 스위치 확인을 건너뜀");
         else try { await StartupSwitchAsync(ct); } catch (Exception ex) { log("시작 시 스위치 확인 오류: " + ex.Message); }
         try { await RecoverAsync(ct); } catch (Exception ex) { log("중단 복구 중 오류: " + ex.Message); }
         foreach (var sg in SideGames) try { GenOf(sg); } catch (Exception ex) { log($"{GameKo(sg)} 생성 엔진 준비 실패: {ex.Message}"); }   // 같이 받던 게임 엔진을 미리 준비 (스위치 줄 안에서 만들지 않게)
         var a = Loop("스위치", SwitchTick, ct);
         var g = Loop("생성", GenerateNext, ct);
-        var b = Loop("휴대폰", c => PhoneTick(1, c), ct);
-        var b2 = Loop("휴대폰2", c => PhoneTick(2, c), ct);
-        var b3 = Loop("휴대폰3", c => PhoneTick(3, c), ct);
-        await Task.WhenAll(a, b, b2, b3, g);
+        var lanes = Enumerable.Range(1, MaxAccounts).Select(k => Loop(k == 1 ? "휴대폰" : $"휴대폰{k}", c => PhoneTick(k, c), ct)).ToList();   // 동시 모드면 계정마다 한 줄
+        await Task.WhenAll(lanes.Append(a).Append(g));
     }
 
     private async Task Loop(string name, Func<CancellationToken, Task> tick, CancellationToken ct)

@@ -11,7 +11,7 @@
 ```
 
 - 지원 게임: 스칼렛·바이올렛 / 소드·실드 / 브릴리언트 다이아몬드·샤이닝 펄 / 레츠고 피카츄·이브이 / 레전즈 아르세우스 / 레전즈 Z-A
-- HOME 계정 1~3개를 동시에 돌림. 게임은 신청자 투표로 바꾸고, 계정이 남으면 다른 게임도 같이 받음(동시 운영)
+- HOME 계정 1~5개를 동시에 돌림. 게임은 신청자 투표로 바꾸고, 계정이 남으면 다른 게임도 같이 받음(동시 운영)
 - 짝 게임(소드·실드 등)은 스위치 세이브로 버전을 알아내고, HOME 게임 선택 화면의 로고도 처음 한 번 알아서 등록
 - 윈도우 관리 창(설치 마법사 포함)에서 켜고 끄고, 대기열·설정·도구를 다룸
 
@@ -19,7 +19,7 @@
 
 ## 쓰기 (윈도우)
 
-1. [Releases](../../releases)에서 `HomeBot_범용판_vX.Y.Z.zip`을 받아 압축을 풉니다
+1. [Releases](../../releases)에서 `HomeBot_vX.Y.Z.zip`을 받아 압축을 풉니다
 2. `HomeBot 시작.bat` 실행 → 처음에 파이썬·adb·패키지 자동 설치 → 한 번 더 실행하면 관리 창과 설치 마법사
 3. 자세한 준비물(커스텀 펌웨어 스위치, sys-botbase, ftpsrv 수정판, 휴대폰/MuMu, 디스코드 봇)과 순서는 zip 안의 `사용법.txt`
 
@@ -50,7 +50,7 @@ git clone --recursive https://github.com/samang600/HomeBot
 cd HomeBot
 # (이미 받았다면) git submodule update --init
 dotnet build HomeBot.Discord -c Release                  # .NET 10 SDK
-tools/pack.sh v1.1.0 path/to/ftpsrv_savefix.zip          # 배포 zip (win-x64, self-contained)
+tools/pack.sh v1.2.0 path/to/ftpsrv_savefix.zip          # 배포 zip (win-x64, self-contained)
 ```
 
 관리 창·워커는 파이썬 3.10+ (`pip install opencv-python numpy tesserocr Pillow`)와 adb가 필요합니다.

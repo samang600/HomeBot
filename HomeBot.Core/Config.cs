@@ -90,12 +90,14 @@ public sealed class HomeCfg
     /// <summary>premium: 풀을 HOME에 쌓음 / free: 박스 1개, 교환 직전에만 올림</summary>
     public string Mode { get; set; } = "free";
     public bool IsFree => string.Equals(Mode, "free", StringComparison.OrdinalIgnoreCase);
-    /// <summary>HOME 계정 (1~3개). 계정마다 스위치 사용자(그 사용자의 HOME)와 같은 HOME 계정으로 로그인한 휴대폰 하나. 비우면 한 계정 (Switch.HomeUserIndex · 워커 기본 기기)</summary>
+    /// <summary>HOME 계정 (1~5개). 계정마다 스위치 사용자(그 사용자의 HOME)와 같은 HOME 계정으로 로그인한 휴대폰 하나. 비우면 한 계정 (Switch.HomeUserIndex · 워커 기본 기기)</summary>
     public List<HomeAccountCfg> Accounts { get; set; } = [];
 }
 
 public sealed class HomeAccountCfg
 {
+    /// <summary>HOME 계정(휴대폰) 최대 수 — 휴대폰 워커(server.py MAX_ACCTS)와 같게</summary>
+    public const int Max = 5;
     /// <summary>스위치 '누가 플레이하겠습니까?' 화면의 순서 (0부터)</summary>
     public int SwitchUser { get; set; }
     /// <summary>휴대폰 adb 주소: MuMu는 127.0.0.1:16384(첫 기기)·16416·16448…, USB 폰은 일련번호, 무선 디버깅은 IP:포트</summary>

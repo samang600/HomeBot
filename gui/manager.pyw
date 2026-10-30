@@ -89,6 +89,7 @@ def worker_url():
     except Exception: u = ""
     return (u or "http://127.0.0.1:8765").rstrip("/")
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+MAX_ACCTS = 5   # HOME 계정(휴대폰) 최대 수 — 봇·워커와 같게
 
 GUI_SET = os.path.join(HERE, "gui_settings.json")
 
@@ -451,7 +452,7 @@ class App(tk.Tk):
         "Vote.Enabled": [("투표 — 투표 채널에서 정한 인원이 모이면 바꿈", True), ("투표 끔 — [🔁 게임 전환]으로만", False)],
         "Discord.TestOnly": [("끔 — 본 서버·테스트 서버 둘 다 받음", False), ("켬 — 테스트 서버에서만 받음", True)],
         "Hybrid.Enabled": [("켬 — 계정이 남으면 다른 게임도 같이 받음", True), ("끔 — 계정 모두 한 게임만", False)],
-        "Limits.MoveBatchMax": [("1마리씩", 1), ("3마리", 3), ("5마리", 5), ("10마리", 10), ("12마리 (2줄)", 12), ("15마리", 15), ("20마리", 20), ("30마리 (박스 하나 전부)", 30)],
+        "Limits.MoveBatchMax": [("1마리씩", 1), ("6마리 (1줄)", 6), ("12마리 (2줄)", 12), ("18마리 (3줄)", 18), ("24마리 (4줄)", 24), ("30마리 (5줄, 박스 하나 전부 · 레츠고는 24)", 30)],
     }
 
     def _settings_tab(self, f):
@@ -511,7 +512,11 @@ class App(tk.Tk):
                     vm = self._kv("vote_mode")
                     if vm in ("0", "1"): val = vm == "1"
                 if key == "Switch.Game": val = str(val).upper()
-                v.set(next((l for l, x in opts if x == val or str(x).lower() == str(val).lower()), opts[0][0])); continue
+                hit = next((l for l, x in opts if x == val or str(x).lower() == str(val).lower()), None)
+                if hit is None and key == "Limits.MoveBatchMax":   # 예전 값(5·10·15·20 등)은 가장 가까운 줄 단위로 보여 줌 (저장하면 그 값으로)
+                    try: hit = min(opts, key=lambda o: (abs(o[1] - int(val)), -o[1]))[0]
+                    except (TypeError, ValueError): hit = None
+                v.set(hit or opts[0][0]); continue
             if val == "" and key == "Switch.TransferBox": val = 1
             if val == "" and key == "Switch.FtpPort": val = 21
             if val == "" and key.startswith("Hybrid."):
@@ -649,14 +654,14 @@ class App(tk.Tk):
         if accts:
             ser = accts[0].get("Phone") or ser
             usr = "" if accts[0].get("AndroidUser") is None else str(accts[0]["AndroidUser"])
-            for k, a in enumerate(accts[1:3], start=2):
+            for k, a in enumerate(accts[1:MAX_ACCTS], start=2):
                 if a.get("Phone"): env[f"PHONE{k}_SERIAL"] = a["Phone"]
                 if a.get("AndroidUser") is not None: env[f"PHONE{k}_USER"] = str(a["AndroidUser"])
         self.gs["serial"], self.gs["user"] = ser, usr
         port = worker_url().rsplit(":", 1)[-1]
         self.worker.args = [PY, "-u", "server.py", "--serial", ser] + (["--user", usr] if str(usr).strip() else []) + (["--port", port] if port.isdigit() else [])
         self.worker.extra_env = env
-        self.worker.phones = [ser] + [a.get("Phone", "") for a in accts[1:3] if a.get("Phone")]
+        self.worker.phones = [ser] + [a.get("Phone", "") for a in accts[1:MAX_ACCTS] if a.get("Phone")]
 
     def open_wizard(self):
         try:

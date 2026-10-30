@@ -2,7 +2,7 @@
 
 1) 디스코드: 봇 토큰(윈도우 사용자 환경 변수 DISCORD_TOKEN에만 저장, 파일에 쓰지 않음)·서버 ID·운영자 ID
 2) 스위치: IP → sys-botbase(6000)·ftpsrv(21) 연결 확인 → FTP로 스위치 사용자와 게임 세이브 목록을 읽음
-3) 세이브 주인(게임 세이브가 있는 사용자)과 다룰 게임, HOME 계정 1~3개(스위치 사용자 + 휴대폰)
+3) 세이브 주인(게임 세이브가 있는 사용자)과 다룰 게임, HOME 계정 1~5개(스위치 사용자 + 휴대폰)
 표준 라이브러리만 씀 (tkinter, ftplib, socket, subprocess).
 """
 import ftplib, os, re, shutil, socket, subprocess, threading
@@ -16,6 +16,7 @@ GAMES = [("VL", "스칼렛·바이올렛", ("0100A3D008C5C000", "01008F6008C5E00
          ("PLA", "레전즈 아르세우스", ("01001F5010DFA000",)),
          ("ZA", "레전즈 Z-A", ("0100F43008C44000",))]
 HOME_TID = "010015F008C54000"
+MAX_ACCTS = 5   # HOME 계정(휴대폰) 최대 수 — 봇·워커와 같게
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -58,7 +59,7 @@ def port_open(ip, port, timeout=3):
 def adb_devices():
     """연결된 휴대폰·에뮬레이터 (MuMu 기기 주소도 연결해 봄)"""
     if not shutil.which("adb"): return []
-    for p in (16384, 16416, 16448, 16480):
+    for p in (16384 + 32 * k for k in range(MAX_ACCTS + 1)):   # MuMu 기기 device-0..5
         try: subprocess.run(["adb", "connect", f"127.0.0.1:{p}"], capture_output=True, timeout=4, creationflags=NO_WINDOW)
         except Exception: pass
     try:
@@ -134,14 +135,14 @@ class Wizard(tk.Toplevel):
             ttk.Checkbutton(gf, text=name, variable=v).grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 24))
             self.gvars[code] = v
 
-        sec("4. HOME 계정 (1~3개)")
+        sec(f"4. HOME 계정 (1~{MAX_ACCTS}개)")
         note("계정마다 'HOME에 로그인된 스위치 사용자' + '같은 HOME 계정으로 로그인한 휴대폰(MuMu 기기 또는 실제 폰)'을 짝지어요. 깡계(무료) HOME 계정이면 됩니다.\n"
              "휴대폰 HOME 앱 언어는 English로 두세요 (봇이 영어 화면으로 인식). ★ 각 HOME 계정의 HOME 박스 1은 비워 두세요 — 봇 작업용이라 다른 개체는 놓아줍니다.\n"
              "실제 폰은 USB 디버깅(또는 무선 디버깅)을 켜고 연결하면 목록에 나옵니다. 워커가 켜져 있는 동안 화면이 1080x1920으로 바뀌고, 끄면 되돌립니다.")
         ttk.Button(body, text="휴대폰 찾기", command=self.find_phones).pack(anchor="w", pady=2)
         self.accts = []
         old = (cfg.get("Home", {}) or {}).get("Accounts", []) or []
-        for k in range(3):
+        for k in range(MAX_ACCTS):
             fr = ttk.LabelFrame(body, text=f"계정 {k + 1}" + (" (안 씀이면 비움)" if k else ""), padding=6); fr.pack(fill="x", pady=3)
             su, ph, au = tk.StringVar(), tk.StringVar(), tk.StringVar()
             if k < len(old):
@@ -243,6 +244,12 @@ class Wizard(tk.Toplevel):
             if au.get().strip().isdigit(): a["AndroidUser"] = int(au.get().strip())
             accts.append(a)
         if not accts: messagebox.showerror("HomeBot", "HOME 계정을 하나 이상 정하세요", parent=self); return
+        seen = set()
+        for a in accts:   # 같은 스위치 사용자나 같은 휴대폰(같은 앱 사용자)을 두 계정에 쓰면 서로 막힘
+            for key in (("u", a["SwitchUser"]), ("p", a["Phone"], a.get("AndroidUser"))):
+                if key in seen:
+                    messagebox.showerror("HomeBot", "두 HOME 계정에 같은 스위치 사용자나 같은 휴대폰을 넣었어요. 계정마다 서로 달라야 합니다", parent=self); return
+                seen.add(key)
         c.setdefault("Home", {})["Accounts"] = accts; c["Home"].setdefault("Mode", "free")
         s["HomeUserIndex"] = accts[0]["SwitchUser"]
         t = s.setdefault("Trainer", {}); t["OT"] = self.ot.get().strip()[:6] or "홈봇"

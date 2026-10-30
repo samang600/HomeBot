@@ -21,7 +21,8 @@ HOMES = {}        # 계정 번호 → Home (1 = #N1, 2 = #N2). 2는 처음 쓸 �
 USER2 = None
 LAST_ACCT = 1
 LOCK = threading.Lock()   # 계정 1 작업 잠금
-LOCKS = {1: LOCK, 2: threading.Lock(), 3: threading.Lock()}   # 계정마다 따로: 두 앱(#N1·#N2)이 따로 창에 떠 있으면 두 계정 작업을 동시에 할 수 있음
+MAX_ACCTS = 5   # HOME 계정(휴대폰) 최대 수 — 봇(Config.MaxAccounts)과 같게
+LOCKS = {1: LOCK, **{k: threading.Lock() for k in range(2, MAX_ACCTS + 1)}}   # 계정마다 따로: 두 앱(#N1·#N2)이 따로 창에 떠 있으면 두 계정 작업을 동시에 할 수 있음
 TRADES_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades_done.jsonl")
 
 
@@ -49,7 +50,8 @@ def home_of(acct):
         if len(acc) >= acct and acc[acct - 1].get("Phone"):
             ser = acc[acct - 1]["Phone"]
             if want_u is None and acc[acct - 1].get("AndroidUser") is not None: want_u = int(acc[acct - 1]["AndroidUser"])
-    ports = [16384 + 32 * (acct - 1)] + [p for p in (16416, 16448, 16480) if p != 16384 + 32 * (acct - 1)]
+    mumu = [16384 + 32 * k for k in range(MAX_ACCTS + 1)]   # MuMu 기기 device-0.. 의 adb 포트
+    ports = [16384 + 32 * (acct - 1)] + [p for p in mumu[1:] if p != 16384 + 32 * (acct - 1)]
     cands = [ser] if ser else [f"127.0.0.1:{p}" for p in ports]   # 아무 기록도 없으면 MuMu 기본 포트 순서로
     used = {(HOME.adb.serial, HOME.adb.user)} | {(h.adb.serial, h.adb.user) for h in HOMES.values()}   # 같은 기기라도 안드로이드 사용자가 다르면 다른 계정
     for sr in cands:
@@ -62,9 +64,9 @@ def home_of(acct):
                 h = Home(a2, log); HOMES[acct] = h
                 return h
         except Exception as e:
-            log(f"두 번째 기기 {sr} 연결 실패:", e)
-    if os.environ.get("PHONE2_SAME_DEVICE", "") != "1":
-        raise RuntimeError("두 번째 기기(device-1)를 adb로 찾지 못함 (PHONE2_SERIAL 환경 변수로 지정 가능)")
+            log(f"계정 {acct} 기기 {sr} 연결 실패:", e)
+    if acct != 2 or os.environ.get("PHONE2_SAME_DEVICE", "") != "1":
+        raise RuntimeError(f"계정 {acct}의 휴대폰을 adb로 찾지 못함 (설정 Home.Accounts의 Phone 확인)")
     u = USER2
     if u is None:
         base = HOME.adb.user if HOME.adb.user is not None else 0
@@ -203,12 +205,15 @@ class H(BaseHTTPRequestHandler):
                 if t == "exit":
                     # 워커 다시 켜기: 지금 하는 작업이 끝나길 기다렸다가(LOCK) 종료 → 관리 창이 30초 안에 다시 켬 (바뀐 코드 적용)
                     def _bye():
-                        with LOCKS[1], LOCKS[2]:
-                            log("워커 종료 요청 → 다시 켜짐")
-                            os._exit(0)
+                        for k in sorted(LOCKS): LOCKS[k].acquire()   # 모든 계정 작업이 끝나길 기다림
+                        log("워커 종료 요청 → 다시 켜짐")
+                        os._exit(0)
                     threading.Thread(target=_bye, daemon=True).start()
                     return self._json(200, {"ok": True, "msg": "종료 예약", "vars": {}, "shot": ""})
-                with LOCKS.get(int(a.get("acct", 1) or 1), LOCK):
+                acct_req = int(a.get("acct", 1) or 1)
+                if acct_req not in LOCKS:
+                    return self._json(200, {"ok": False, "msg": f"계정 번호 {acct_req}는 지원하지 않음 (1~{MAX_ACCTS})", "vars": {}, "shot": ""})
+                with LOCKS[acct_req]:
                     log("작업:", t, a)
                     try:
                         HM = home_of(a.get("acct", 1))
