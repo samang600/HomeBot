@@ -336,12 +336,15 @@ class App(tk.Tk):
     # ---------- 대기열
     def _queue_tab(self, f):
         cols = ("id", "game", "st", "what", "name", "user", "key")
-        tv = ttk.Treeview(f, columns=cols, show="headings", selectmode="browse", height=14)
+        tv = ttk.Treeview(f, columns=cols, show="headings", selectmode="browse", height=6)
         for c, t, w in (("id", "번호", 60), ("game", "게임", 110), ("st", "상태", 120), ("what", "신청 포켓몬", 280), ("name", "디스코드 이름", 170), ("user", "사용자 ID", 160), ("key", "맡길 포켓몬", 200)):
             tv.heading(c, text=t); tv.column(c, width=w, anchor="w")
-        tv.pack(fill="both", expand=True)
+        # 버튼·안내를 먼저 아래에 붙이고 표가 남은 공간을 씀 (창이 작아도 버튼이 가려지지 않게)
+        ttk.Label(f, text="회색 줄은 이미 스위치·HOME에 올라가 순서를 바꿀 수 없는 신청입니다. 취소하면 사용자에게 DM이 갑니다.", foreground="#666").pack(side="bottom", anchor="w", pady=(4, 0))
+        b = ttk.Frame(f); b.pack(side="bottom", fill="x", pady=(8, 0))
+        qsb = ttk.Scrollbar(f, orient="vertical", command=tv.yview); tv.configure(yscrollcommand=qsb.set)
+        qsb.pack(side="right", fill="y"); tv.pack(fill="both", expand=True)
         tv.tag_configure("fixed", foreground="#888")
-        b = ttk.Frame(f); b.pack(fill="x", pady=(8, 0))
         for text, d in (("⏫ 맨 위로", "top"), ("▲ 위로", "up"), ("▼ 아래로", "down"), ("⏬ 맨 아래로", "bottom")):
             ttk.Button(b, text=text, command=lambda d=d: self._q_move(d)).pack(side="left", padx=2)
         ttk.Separator(b, orient="vertical").pack(side="left", fill="y", padx=8)
@@ -349,9 +352,9 @@ class App(tk.Tk):
         ttk.Button(b, text="✅ 교환 완료로 처리", command=self._q_done).pack(side="left", padx=2)
         ttk.Button(b, text="↩ 다시 넣기", command=self._q_requeue).pack(side="left", padx=2)
         ttk.Button(b, text="✉ DM 보내기", command=self._q_dm).pack(side="left", padx=2)
-        ttk.Button(b, text="대기열 초기화 (대기 중만)", command=lambda: self._q_clear(False)).pack(side="left", padx=2)
-        ttk.Button(b, text="전체 초기화 (교환 중 포함)", command=lambda: self._q_clear(True)).pack(side="left", padx=2)
-        ttk.Label(f, text="회색 줄은 이미 스위치·HOME에 올라가 순서를 바꿀 수 없는 신청입니다. 취소하면 사용자에게 DM이 갑니다.", foreground="#666").pack(anchor="w", pady=(6, 0))
+        b2 = ttk.Frame(f); b2.pack(side="bottom", fill="x", pady=(4, 0), before=b)   # 둘째 줄: 초기화 (좁은 창에서도 잘리지 않게)
+        ttk.Button(b2, text="대기열 초기화 (대기 중만)", command=lambda: self._q_clear(False)).pack(side="left", padx=2)
+        ttk.Button(b2, text="전체 초기화 (교환 중 포함)", command=lambda: self._q_clear(True)).pack(side="left", padx=2)
         self.qtv = tv; self._qsig = None
         self.oq = OfflineQueue(os.path.join(DATA, "homebot.db"))
 
@@ -456,10 +459,9 @@ class App(tk.Tk):
     }
 
     def _settings_tab(self, f):
-        canvas = tk.Canvas(f, highlightthickness=0); sb = ttk.Scrollbar(f, command=canvas.yview)
-        inner = ttk.Frame(canvas); inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw"); canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
+        bf = ttk.Frame(f); bf.pack(side="bottom", fill="x", pady=(8, 0))   # 저장 버튼은 늘 보이게 아래에 고정
+        area = ttk.Frame(f); area.pack(fill="both", expand=True)
+        inner = self._scroll_area(area)
         self.svars = {}
         for title, items in self.FIELDS:
             lf = ttk.LabelFrame(inner, text=title, padding=8); lf.pack(fill="x", pady=4, padx=2)
@@ -483,7 +485,6 @@ class App(tk.Tk):
                 else:
                     ttk.Entry(lf, textvariable=v, width=40, show="*" if key.endswith("Pass") else "").grid(row=r, column=1, sticky="w", pady=2)
                 self.svars[key] = v
-        bf = ttk.Frame(inner); bf.pack(fill="x", pady=8)
         ttk.Button(bf, text="💾 저장", style="Big.TButton", command=self._save_settings).pack(side="left")
         ttk.Button(bf, text="다시 불러오기", command=self._load_settings).pack(side="left", padx=6)
         ttk.Button(bf, text="🧭 설치 마법사", command=self.open_wizard).pack(side="left", padx=6)
@@ -600,16 +601,31 @@ class App(tk.Tk):
                 db.execute("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
         except Exception as e: messagebox.showwarning("HomeBot", f"봇 기록을 바꾸지 못했습니다: {e}")
 
+    def _scroll_area(self, parent):
+        """세로로 스크롤되는 칸 (창이 작거나 화면 배율이 커도 아래 버튼까지 닿게). 마우스 휠은 그 칸 위에 있을 때만"""
+        canvas = tk.Canvas(parent, highlightthickness=0); sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        win = canvas.create_window((0, 0), window=inner, anchor="nw"); canvas.configure(yscrollcommand=sb.set)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))   # 안쪽 칸 폭을 창에 맞춤
+        sb.pack(side="right", fill="y"); canvas.pack(side="left", fill="both", expand=True)
+        def wheel(e):
+            if canvas.yview() != (0.0, 1.0): canvas.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        return inner
+
     def _text_tab(self, nb, title):
         f = ttk.Frame(nb); nb.add(f, text=title)
-        t = tk.Text(f, wrap="word", font=("Consolas", 10), bg="#111418", fg="#d8dee9", insertbackground="#fff", relief="flat", padx=8, pady=6)
+        t = tk.Text(f, wrap="word", font=("Consolas", 10), bg="#111418", fg="#d8dee9", insertbackground="#fff", relief="flat", padx=8, pady=6, height=8)   # height는 최소 크기 (창에 맞춰 늘어남)
         sb = ttk.Scrollbar(f, command=t.yview); t.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y"); t.pack(fill="both", expand=True)
         t.tag_configure("err", foreground="#ff7b72"); t.tag_configure("ok", foreground="#7ee787"); t.tag_configure("sep", foreground="#8b949e")
         return t
 
     def _tools(self, f):
-        left = ttk.Frame(f); left.pack(side="left", fill="y", padx=(0, 10))
+        lwrap = ttk.Frame(f, width=300); lwrap.pack(side="left", fill="y", padx=(0, 10)); lwrap.pack_propagate(False)
+        left = self._scroll_area(lwrap)
         def sec(text): ttk.Label(left, text=text, font=("Malgun Gothic", 10, "bold")).pack(anchor="w", pady=(10, 2))
         def btn(text, cmd): ttk.Button(left, text=text, width=26, command=cmd).pack(anchor="w", pady=1)
         sec("운영 (봇이 켜져 있을 때)")
@@ -639,7 +655,7 @@ class App(tk.Tk):
         btn("실패 화면 폴더 열기", lambda: self._open(os.path.join(PW, "shots")))
         right = ttk.Frame(f); right.pack(side="left", fill="both", expand=True)
         ttk.Label(right, text="도구 출력").pack(anchor="w")
-        t = tk.Text(right, wrap="word", font=("Consolas", 10), bg="#111418", fg="#d8dee9", relief="flat", padx=8, pady=6)
+        t = tk.Text(right, wrap="word", font=("Consolas", 10), bg="#111418", fg="#d8dee9", relief="flat", padx=8, pady=6, height=8)
         sb = ttk.Scrollbar(right, command=t.yview); t.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y"); t.pack(fill="both", expand=True)
         t.tag_configure("err", foreground="#ff7b72"); t.tag_configure("ok", foreground="#7ee787"); t.tag_configure("sep", foreground="#8b949e")
