@@ -371,6 +371,16 @@ def main():
         except Exception:
             pass
         HOME = Home(adb, log)
+    def _memlog():
+        # 1분마다 워커·컴퓨터 메모리를 shots/mem.log에 (메모리 부족 오류가 워커 탓인지 컴퓨터 전체 탓인지 가리려고)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots", "mem.log")
+        while True:
+            try:
+                used, free = mem_mb()
+                with open(path, "a", encoding="utf-8") as fp: fp.write(f"{time.strftime('%m-%d %H:%M:%S')} worker={used}MB free_commit={free}MB busy={sorted(BUSY_SINCE)}\n")
+            except Exception: pass
+            time.sleep(60)
+    threading.Thread(target=_memlog, daemon=True).start()
     threading.Thread(target=V.name_ocr_ready, daemon=True).start()   # 이름 인식 준비 여부를 미리 확인해 둠
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
     log(f"워커 서비스 http://127.0.0.1:{a.port}  (phone={'on' if HOME else 'off'})")
