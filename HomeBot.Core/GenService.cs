@@ -36,7 +36,7 @@ public sealed class GenService
         var ver = VersionOf?.Invoke(game ?? c.Switch.Game);
         Game = Enum.TryParse<GameVersion>(GameCodeToVersion(string.IsNullOrEmpty(ver) ? game ?? c.Switch.Game : ver), true, out var g) ? g : GameVersion.SL;
         Sav = LoadSave();
-        ParseSettings.InitFromSaveFileData(Sav);
+        ParseSettings.InitFromSaveFileData(Sav); ParseSettings.Settings.Handler.CheckActiveHandler = false;   // 받은 트레이너(HT) 이름·성별 불일치는 따지지 않음 (운영자 요청 11-01, HOME도 보지 않음)
         // 자동 합법화(ALM)도 봇 트레이너(언어 포함)로 만들게 등록 — 안 하면 ALM 기본값(영어, 어버이 'ALM')이 쓰임
         var t = c.Switch.Trainer;
         pref = new TrainerPref(t.OT, (byte)t.Gender, t.TID, t.SID, Sav.Language > 0 ? Sav.Language : (int)LanguageID.Korean);
@@ -53,7 +53,7 @@ public sealed class GenService
     private void Activate()
     {
         if (active == this) return;
-        ParseSettings.InitFromSaveFileData(Sav);
+        ParseSettings.InitFromSaveFileData(Sav); ParseSettings.Settings.Handler.CheckActiveHandler = false;   // 받은 트레이너(HT) 이름·성별 불일치는 따지지 않음 (운영자 요청 11-01, HOME도 보지 않음)
         GenTrainers.Register(Sav, _ => null, _ => pref, GenTrainers.SafeLang);
         active = this;
     }
