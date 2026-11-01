@@ -36,6 +36,8 @@ public interface ISwitchWorker
     Task<StepResult> MoveBoxToHomeAsync(int gameBox, int homeBox, CancellationToken ct, IReadOnlyList<int> knownSlots = null);
     /// <summary>스위치 HOME 앱이 켜진 상태에서 HOME 박스 읽기 (HOME Live). 1부터.</summary>
     Task<List<HomeSlot>> ReadHomeBoxesAsync(int fromBox, int toBox, CancellationToken ct);
+    /// <summary>스위치 배터리 % (sys-botbase 'charge'). 모르면 null.</summary>
+    Task<int?> BatteryAsync(CancellationToken ct) => Task.FromResult<int?>(null);
 }
 
 /// <summary>HOME 폰 (ADB). 파이썬 워커 서비스에 HTTP로 작업을 맡김.</summary>

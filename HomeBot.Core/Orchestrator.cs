@@ -847,7 +847,7 @@ public sealed class Orchestrator
         var all = db.Orders(Active);
         var rot = $"교환 게임: {GameKo(Game)}" + (SwitchAt is { } sa ? $" · {Kst(sa)}에 {GameKo(OtherGame)}로 교대" : VoteMode ? "" : " · 자동 교대 꺼짐")
             + (VoteMode && !switchRequested ? (DateTime.UtcNow < VoteOpenAt ? $" · 전환 투표 {Kst(VoteOpenAt)}부터" : $" · 전환 투표 {Votes().Count}/{VoteNeeded}") : "") + (switchRequested ? " · 전환 요청됨" : "") + "\n" + (HybridLine() is { Length: > 0 } hl ? hl + "\n" : "");
-        return rot + $"스위치 {(sw.Connected ? "연결" : "끊김")} · {SwitchState}\n휴대폰 {(phone != null ? "켬" : "끔")} · {PhoneState}\n{(Paused ? "⏸ 일시정지" : "▶ 가동")}{(IntakeClosed ? " · 🚫 신청 마감" : "")} · 진행 중 {all.Count}건 · 최근 1시간 교환 {db.TradesLastHour()}" +
+        return rot + $"스위치 {(sw.Connected ? "연결" : "끊김")}{(Battery is { } bt ? $" · 🔋 {bt}%" : "")} · {SwitchState}\n휴대폰 {(phone != null ? "켬" : "끔")} · {PhoneState}\n{(Paused ? "⏸ 일시정지" : "▶ 가동")}{(IntakeClosed ? " · 🚫 신청 마감" : "")} · 진행 중 {all.Count}건 · 최근 1시간 교환 {db.TradesLastHour()}" +
                $"\n" + string.Join("\n", all.Take(8).Select(o => $"#{o.Id} {o.Describe} · {o.Status.Ko()}")) + (LastError.Length > 0 ? "\n마지막 오류: " + LastError : "");
     }
 
@@ -976,7 +976,34 @@ public sealed class Orchestrator
         var a = Loop("스위치", SwitchTick, ct);
         var g = Loop("생성", GenerateNext, ct);
         var lanes = Enumerable.Range(1, MaxAccounts).Select(k => Loop(k == 1 ? "휴대폰" : $"휴대폰{k}", c => PhoneTick(k, c), ct)).ToList();   // 동시 모드면 계정마다 한 줄
-        await Task.WhenAll(lanes.Append(a).Append(g));
+        var bat = BatteryLoop(ct);
+        await Task.WhenAll(lanes.Append(a).Append(g).Append(bat));
+    }
+
+    public int? Battery { get; private set; }
+    private bool batteryWarned;
+    /// <summary>2분마다 스위치 배터리를 읽어 상태에 띄움. 20% 이하로 떨어지면 운영자에게 한 번 알림 (30% 넘게 다시 차면 초기화)</summary>
+    private async Task BatteryLoop(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (sw.Connected && !SwitchHold)
+                {
+                    var v = await sw.BatteryAsync(ct);
+                    if (v is { } b)
+                    {
+                        Battery = b;
+                        if (b <= 20 && !batteryWarned) { batteryWarned = true; await AdminAlert($"🔋 스위치 배터리가 {b}%예요. 충전기를 확인해 주세요"); }
+                        else if (b > 30) batteryWarned = false;
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch { }
+            try { await Task.Delay(TimeSpan.FromMinutes(2), ct); } catch { break; }
+        }
     }
 
     private async Task Loop(string name, Func<CancellationToken, Task> tick, CancellationToken ct)
@@ -1318,6 +1345,15 @@ public sealed class Orchestrator
             if (item == null) { Fail(o, "배정된 개체가 없습니다"); continue; }
             // 휴대폰에서 이름으로 골라내므로, 같은 종(이름이 같거나 비슷한)은 한 묶음에 함께 넣지 않음 → 이번 묶음은 여기서 마감
             var mk = gen.FromBytes(item.PkBytes, item.Format);
+            // 브다샤펄 전설·환상: 생성한 뒤에 같은 조합이 HOME으로 올라갔을 수 있음 (11-01 18:01 #8787 이로치 칠색조 — 앞 신청 #8783이 옮기는 사이 취소돼 대기열 확인을 빠져나감)
+            // → HOME이 이 개체를 막아 범위 이동 전체가 실패하므로 넣기 전에 기록을 다시 확인
+            if (BdspSpecialKey(g, mk) is { } bkey && BdspSent().Contains(bkey))
+            {
+                db.Reserve(item.Id, null); db.SetLocation(item.Id, Location.Gone, -1, -1);
+                var why = BdspBlock(g, mk, o.Id) ?? "HOME이 받지 않는 개체예요";
+                if (Fail(o, why)) await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 {GameKo(g)}에 넣을 수 없습니다: {why}");
+                continue;
+            }
             // 같은 종이 겹쳐도 묶음에 함께 넣음: 대기열 순서 = 칸 순서이고, 휴대폰에서 같은 이름 중 몇 번째인지로 고름 (SearchOnce)
             int first = HomeBot.Core.Workers.SwitchWorker.FirstSlotOf(cfg, g);   // 레츠고: 맨 윗줄(파티)은 건너뜀
             int slot = Enumerable.Range(first, 30 - first).FirstOrDefault(i => !used.Contains(i) && placed.All(x => x.slot != i), -1);
@@ -1834,11 +1870,13 @@ public sealed class Orchestrator
         var name = gen.Strings.Species[pk.Species] + (pk.IsShiny ? " 이로치" : "");
         string Why(string w) => $"브릴리언트 다이아몬드·샤이닝 펄의 {name}은(는) {w}. HOME은 브다샤펄 세이브 하나에서 전설·환상을 종마다 일반색·이로치 각각 한 번만 받아요. 다른 게임으로 신청해 주세요";
         if (BdspSent().Contains(key)) return Why("이 봇 세이브에서 이미 HOME으로 보냈어요");
-        foreach (var other in db.Orders(Active))
+        // 진행 중인 신청 + 옮기는 사이 취소돼 개체가 아직 스위치·HOME에 남은 신청 (그대로 HOME에 올라가 기록됨)
+        foreach (var other in db.Orders(Active).Concat(db.Orders(OrderStatus.Cancelled).TakeLast(50)))
         {
             if (other.Id == selfId || other.PoolId == null || (NormOrNull(other.Game) ?? Game) != "BD") continue;
             var it = db.GetPool(other.PoolId.Value);
             if (it == null || it.Species != pk.Species || it.Shiny != pk.IsShiny) continue;
+            if (other.Status == OrderStatus.Cancelled && it.Location is not (Location.Switch or Location.Home)) continue;
             try { if (BdspSpecialKey("BD", GenOf("BD").FromBytes(it.PkBytes, it.Format)) == key) return Why($"이미 다른 신청(#{other.Id})으로 보내는 중이에요"); } catch { }
         }
         return null;

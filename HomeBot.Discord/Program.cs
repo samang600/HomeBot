@@ -417,7 +417,7 @@ Embed AdminEmbed()
         .AddField("🎮 교환 게임", orch.RotationLine(), true)
         .AddField("📈 최근 1시간", $"{orch.TradesLastHour()}건 교환", true)
         .AddField("📋 진행 중", $"{all.Count}건", true)
-        .AddField("🕹 스위치", (orch.SwitchConnected ? "연결 · " : "끊김 · ") + Cut(orch.SwitchState, 200))
+        .AddField("🕹 스위치", (orch.SwitchConnected ? "연결 · " : "끊김 · ") + (orch.Battery is { } bt ? $"🔋 {bt}% · " : "") + Cut(orch.SwitchState, 200))
         .AddField("📱 휴대폰", Cut(orch.PhoneState, 200));
     if (all.Count > 0) eb.AddField("대기열 앞쪽", Cut(string.Join("\n", all.Take(8).Select(o => $"{StIcon(o.Status)} #{o.Id} {Cut(o.Describe, 40)}")), 1000));
     if (orch.LastError.Length > 0) eb.AddField("⚠️ 마지막 오류", Cut(orch.LastError, 1000));

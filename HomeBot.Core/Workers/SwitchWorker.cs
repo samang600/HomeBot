@@ -268,6 +268,19 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
             return sb.ToString().Trim();
         }
     }
+    private bool batteryUnsupported;
+    /// <summary>배터리 %: sys-botbase 'charge' 명령 (지원하지 않는 버전이면 답이 없어 한 번 실패 뒤로는 묻지 않음)</summary>
+    public Task<int?> BatteryAsync(CancellationToken ct) => Task.Run<int?>(() =>
+    {
+        if (batteryUnsupported || !Connected) return null;
+        try
+        {
+            var r = Raw("charge", true, 5000);
+            if (int.TryParse(r.Trim(), out var v) && v is >= 0 and <= 100) return v;
+            batteryUnsupported = true; log($"스위치 배터리를 읽지 못함 (답: '{r}') → 배터리 표시 끔"); return null;
+        }
+        catch (Exception ex) { batteryUnsupported = true; log("스위치 배터리를 읽지 못함 (sys-botbase가 'charge'를 지원하지 않는 듯): " + ex.Message); return null; }
+    }, ct);
     public Task ClickAsync(string button, CancellationToken ct) => Task.Run(() => Raw($"click {button}", false), ct);
     public Task TouchAsync(int x, int y, CancellationToken ct) => Task.Run(() => Raw($"touch {x} {y}", false), ct);
     /// <summary>운영자용: sys-botbase 원시 명령 (detachController 등)</summary>
