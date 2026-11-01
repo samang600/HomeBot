@@ -6,9 +6,11 @@ namespace HomeBot.Core.Workers;
 /// 버튼 매크로 (macros/*.json). 단계 종류:
 ///  {"click":"A","n":2,"wait":600}      버튼 n번, 각 wait ms 뒤
 ///  {"hold":"DDOWN","ms":1500}          누르고 있기
+///  {"touch":[235,322],"wait":800}      화면 터치
 ///  {"stick":"LEFT","x":0,"y":-30000,"ms":500}
 ///  {"sleep":1000}
 ///  {"expect":"sv_portal","timeout":8000,"fail":"abort|continue|goto:라벨"}  화면 템플릿 확인
+///  {"expect":"home_title","timeout":96400,"or":{"home_error":"goto:err1"}}  기다리는 동안 같은 캡처에서 다른 화면도 확인 → 보이면 그 동작 (abort|continue|goto:라벨)
 ///  {"label":"다시"}  {"goto":"다시"}
 ///  {"ocr":[x,y,w,h],"into":"trainer"}  화면 글자 읽어 변수에
 ///  {"code":"${code}","keys":{"0":["DDOWN","DDOWN","DDOWN","A"],...}}  숫자 코드 입력
@@ -24,6 +26,8 @@ public sealed class MacroStep
     [JsonPropertyName("times")] public string Times { get; set; }
     [JsonPropertyName("wait")] public int Wait { get; set; } = 500;
     [JsonPropertyName("hold")] public string Hold { get; set; }
+    /// <summary>화면 터치 [x, y] (1280×720 기준). 스위치 메뉴에서 소프트웨어 줄로 커서를 확실히 옮길 때</summary>
+    [JsonPropertyName("touch")] public int[] Touch { get; set; }
     [JsonPropertyName("ms")] public int Ms { get; set; }
     [JsonPropertyName("stick")] public string Stick { get; set; }
     [JsonPropertyName("x")] public short X { get; set; }
@@ -35,6 +39,8 @@ public sealed class MacroStep
     [JsonPropertyName("fail")] public string Fail { get; set; } = "abort";
     /// <summary>true면 못 봤을 때 로그·실패 화면을 남기지 않음 (반복 확인용)</summary>
     [JsonPropertyName("quiet")] public bool Quiet { get; set; }
+    /// <summary>expect 대기 중 매번 같은 캡처에서 함께 볼 템플릿 → 동작. 기대 화면이 먼저 보이면 그대로 성공 (예: HOME 오류 창)</summary>
+    [JsonPropertyName("or")] public Dictionary<string, string> Or { get; set; }
     [JsonPropertyName("label")] public string Label { get; set; }
     [JsonPropertyName("goto")] public string Goto { get; set; }
     [JsonPropertyName("ocr")] public int[] Ocr { get; set; }
@@ -68,6 +74,7 @@ public interface IMacroDevice
 {
     Task ClickAsync(string button, CancellationToken ct);
     Task HoldAsync(string button, int ms, CancellationToken ct);
+    Task TouchAsync(int x, int y, CancellationToken ct) => Task.CompletedTask;
     Task StickAsync(string stick, short x, short y, int ms, CancellationToken ct);
     Task<byte[]> ScreenshotAsync(CancellationToken ct);
 }
@@ -96,26 +103,40 @@ public sealed class MacroRunner(IMacroDevice dev, IVision vision, string shotDir
             if (s.Repeat > 0 && s.Steps != null) { for (int k = 0; k < s.Repeat; k++) { var rr = await RunSteps(s.Steps, v, name, ct); if (!rr.Ok) return rr; } continue; }
             if (s.Click != null) { int times = s.Times != null && int.TryParse(Macro.Sub(s.Times, v), out var tv) ? tv : s.N; for (int k = 0; k < times; k++) { await dev.ClickAsync(Macro.Sub(s.Click, v), ct); await Task.Delay(s.Wait, ct); } continue; }
             if (s.Hold != null) { await dev.HoldAsync(Macro.Sub(s.Hold, v), s.Ms, ct); continue; }
+            if (s.Touch is { Length: 2 }) { await dev.TouchAsync(s.Touch[0], s.Touch[1], ct); await Task.Delay(s.Wait, ct); continue; }
             if (s.Stick != null) { await dev.StickAsync(s.Stick, s.X, s.Y, s.Ms, ct); continue; }
             if (s.Sleep > 0) { await Task.Delay(s.Sleep, ct); continue; }
             if (s.Shot != null) { var img = await dev.ScreenshotAsync(ct); Save(img, name, Macro.Sub(s.Shot, v)); continue; }
             if (s.Expect != null)
             {
-                var tpl = Macro.Sub(s.Expect, v); var sw = System.Diagnostics.Stopwatch.StartNew(); bool ok = false; byte[] last = null;
+                var tpl = Macro.Sub(s.Expect, v); var sw = System.Diagnostics.Stopwatch.StartNew(); bool ok = false; byte[] last = null; string orTpl = null, orAct = null;
                 while (sw.ElapsedMilliseconds < s.Timeout)
                 {
                     last = await dev.ScreenshotAsync(ct);
                     bool found = false;
                     if (last.Length > 0) { try { (found, _, _, _) = await vision.MatchAsync(last, tpl, s.Threshold, ct); } catch (Exception ex) when (ex is not OperationCanceledException) { log($"[{name}] 화면 인식 오류: {ex.Message}"); } }
                     if (found) { ok = true; break; }
+                    if (s.Or != null && last.Length > 0)
+                        foreach (var (ot, oa) in s.Or)
+                        {
+                            var t2 = Macro.Sub(ot, v); bool f2 = false;
+                            try { (f2, _, _, _) = await vision.MatchAsync(last, t2, s.Threshold, ct); } catch (Exception ex) when (ex is not OperationCanceledException) { log($"[{name}] 화면 인식 오류: {ex.Message}"); }
+                            if (f2) { orTpl = t2; orAct = oa; break; }
+                        }
+                    if (orAct != null) break;
                     await Task.Delay(100, ct);
                 }
                 if (ok) continue;
-                var shot = !s.Quiet && last is { Length: > 0 } ? Save(last, name, "fail_" + tpl) : "";
-                if (!s.Quiet) log($"[{name}] 기대 화면 아님: {tpl}");
-                if (s.Fail == "continue") continue;
-                if (s.Fail.StartsWith("goto:")) { var l = s.Fail[5..]; if (StopAt != null && l == StopAt) return StepResult.Pass("stop:" + StopAt); i = steps.FindIndex(x => x.Label == l); if (i < 0) return StepResult.Fail($"라벨 없음: {l}", shot); continue; }
-                return StepResult.Fail($"화면이 '{tpl}'이 아님", shot);
+                var act = orAct ?? s.Fail; var shot = "";
+                if (orAct != null) log($"[{name}] {tpl} 대신 {orTpl} → {orAct}");
+                else
+                {
+                    shot = !s.Quiet && last is { Length: > 0 } ? Save(last, name, "fail_" + tpl) : "";
+                    if (!s.Quiet) log($"[{name}] 기대 화면 아님: {tpl}");
+                }
+                if (act == "continue") continue;
+                if (act.StartsWith("goto:")) { var l = act[5..]; if (StopAt != null && l == StopAt) return StepResult.Pass("stop:" + StopAt); i = steps.FindIndex(x => x.Label == l); if (i < 0) return StepResult.Fail($"라벨 없음: {l}", shot); continue; }
+                return StepResult.Fail(orAct != null ? $"화면이 '{orTpl}'" : $"화면이 '{tpl}'이 아님", shot);
             }
             if (s.Ocr != null && s.Into != null)
             {

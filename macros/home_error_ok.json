@@ -1,0 +1,4 @@
+{"name": "home_error_ok", "description": "HOME 오류 창(에러 코드 2-ALZTA 등 · 타이틀 화면으로 돌아감)이 떠 있으면 OK. 없으면 실패로 끝남.", "steps": [
+ {"expect": "home_error", "timeout": 2500, "quiet": true, "note": "오류 창 확인"},
+ {"click": "A", "wait": 4000}
+]}

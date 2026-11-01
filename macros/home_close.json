@@ -1,49 +1,24 @@
-{
-"name": "home_close",
-"description": "세이브 모드: home_save 뒤(스위치 메뉴, HOME 일시정지) HOME 앱을 닫음. 게임은 켜지 않음.",
-"steps": [
-{
-"click": "X",
-"wait": 1200,
-"note": "스위치 메뉴: 켜진 HOME 앱 종료 창 (세이브를 ftpsrv로 다시 쓰려면 HOME이 닫혀 있어야 함)"
-},
-{
-"expect": "sw_close_dialog",
-"timeout": 3000,
-"fail": "goto:retry",
-"quiet": true
-},
-{
-"goto": "close_ok"
-},
-{
-"label": "retry"
-},
-{
-"click": "HOME",
-"wait": 1500,
-"note": "메뉴가 아니었으면 메뉴로"
-},
-{
-"click": "X",
-"wait": 1200
-},
-{
-"expect": "sw_close_dialog",
-"timeout": 3000,
-"fail": "goto:end",
-"quiet": true
-},
-{
-"label": "close_ok"
-},
-{
-"click": "A",
-"wait": 2500,
-"note": "종료"
-},
-{
-"label": "end"
-}
-]
-}
+{"name": "home_close", "description": "세이브 모드: home_save 뒤(스위치 메뉴, HOME 일시정지) HOME 앱을 닫음. 게임은 켜지 않음.", "steps": [
+ {"expect": "sw_soft_focus", "timeout": 700, "fail": "goto:sfx1_touch", "quiet": true, "note": "X(소프트웨어 종료)는 커서가 소프트웨어 줄에 있어야 먹음"},
+ {"goto": "sfx1_ok"},
+ {"label": "sfx1_touch"},
+ {"expect": "sw_menu_icons", "timeout": 600, "fail": "goto:sfx1_ok", "quiet": true, "note": "스위치 메뉴 화면일 때만 터치 (게임·HOME 화면에서 엉뚱한 곳을 누르지 않게)"},
+ {"touch": [235, 322], "wait": 900, "note": "커서가 아래 아이콘 줄에 갇힘(위 버튼이 안 먹음) → 맨 왼쪽 소프트웨어 칸을 터치해 커서만 옮김"},
+ {"label": "sfx1_ok"},
+ {"click": "X", "wait": 1200, "note": "스위치 메뉴: 켜진 HOME 앱 종료 창 (세이브를 ftpsrv로 다시 쓰려면 HOME이 닫혀 있어야 함)"},
+ {"expect": "sw_close_dialog", "timeout": 3000, "fail": "goto:retry", "quiet": true},
+ {"goto": "close_ok"},
+ {"label": "retry"},
+ {"click": "HOME", "wait": 1500, "note": "메뉴가 아니었으면 메뉴로"},
+ {"expect": "sw_soft_focus", "timeout": 700, "fail": "goto:sfx2_touch", "quiet": true, "note": "X(소프트웨어 종료)는 커서가 소프트웨어 줄에 있어야 먹음"},
+ {"goto": "sfx2_ok"},
+ {"label": "sfx2_touch"},
+ {"expect": "sw_menu_icons", "timeout": 600, "fail": "goto:sfx2_ok", "quiet": true, "note": "스위치 메뉴 화면일 때만 터치 (게임·HOME 화면에서 엉뚱한 곳을 누르지 않게)"},
+ {"touch": [235, 322], "wait": 900, "note": "커서가 아래 아이콘 줄에 갇힘(위 버튼이 안 먹음) → 맨 왼쪽 소프트웨어 칸을 터치해 커서만 옮김"},
+ {"label": "sfx2_ok"},
+ {"click": "X", "wait": 1200},
+ {"expect": "sw_close_dialog", "timeout": 3000, "fail": "goto:end", "quiet": true},
+ {"label": "close_ok"},
+ {"click": "A", "wait": 2500, "note": "종료"},
+ {"label": "end"}
+]}
