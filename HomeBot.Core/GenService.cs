@@ -31,12 +31,11 @@ public sealed class GenService
         GenHost.ExcludeUntradable = true;   // 교환·HOME 맡기기가 안 되는 개체(라이드 코라이돈·미라이돈 등)는 만들지 않음
         APILegality.AllowTrainerOverride = true; APILegality.SetMatchingBalls = true; APILegality.ForceSpecifiedBall = true;
         APILegality.SetAllLegalRibbons = false; APILegality.Timeout = 45; Legalizer.EnableEasterEggs = false;
-        // (트래커 검사는 PKHeX 기본값 그대로)
         // 짝 게임(스칼렛·바이올렛 등)은 설정에 짝 코드만 있음 → 세이브 폴더로 알아낸 실제 버전이 있으면 그걸로 (어버이 기록·조우가 그 버전 기준)
         var ver = VersionOf?.Invoke(game ?? c.Switch.Game);
         Game = Enum.TryParse<GameVersion>(GameCodeToVersion(string.IsNullOrEmpty(ver) ? game ?? c.Switch.Game : ver), true, out var g) ? g : GameVersion.SL;
         Sav = LoadSave();
-        ParseSettings.InitFromSaveFileData(Sav); ParseSettings.Settings.Handler.CheckActiveHandler = false;   // 받은 트레이너(HT) 이름·성별 불일치는 따지지 않음 (운영자 요청 11-01, HOME도 보지 않음)
+        ApplyParse();
         // 자동 합법화(ALM)도 봇 트레이너(언어 포함)로 만들게 등록 — 안 하면 ALM 기본값(영어, 어버이 'ALM')이 쓰임
         var t = c.Switch.Trainer;
         pref = new TrainerPref(t.OT, (byte)t.Gender, t.TID, t.SID, Sav.Language > 0 ? Sav.Language : (int)LanguageID.Korean);
@@ -49,11 +48,20 @@ public sealed class GenService
     public static Func<string, string> VersionOf { get; set; }
     private static string GameCodeToVersion(string g) => (g ?? "").Trim().ToUpperInvariant() switch { "PLA" => "PLA", "ZA" => "ZA", "SH" => "SH", "SW" => "SW", "GP" => "GP", "GE" => "GE", "BD" => "BD", "SP" => "SP", "SL" => "SL", _ => "VL" };
 
+    /// <summary>합법 검사 설정: 받은 트레이너(HT) 이름·성별 불일치는 따지지 않음 (운영자 요청 11-01, HOME도 보지 않음).
+    /// 소드·실드는 HOME이 트래커를 검사하지 않으므로 트래커가 없어도(GO·다른 게임 출신) 불법으로 보지 않음 (운영자 요청 11-02). 다른 게임은 PKHeX 기본(불법).</summary>
+    private void ApplyParse()
+    {
+        ParseSettings.InitFromSaveFileData(Sav);
+        ParseSettings.Settings.Handler.CheckActiveHandler = false;
+        ParseSettings.Settings.HOMETransfer.HOMETransferTrackerNotPresent = Sav.Context == EntityContext.Gen8 ? Severity.Fishy : Severity.Invalid;   // 앱의 '소드실드 트래커 검사 끔'과 같음
+    }
+
     /// <summary>이 게임의 전역 설정을 걸어 둠 (gate를 잡은 상태에서만 부름)</summary>
     private void Activate()
     {
         if (active == this) return;
-        ParseSettings.InitFromSaveFileData(Sav); ParseSettings.Settings.Handler.CheckActiveHandler = false;   // 받은 트레이너(HT) 이름·성별 불일치는 따지지 않음 (운영자 요청 11-01, HOME도 보지 않음)
+        ApplyParse();
         GenTrainers.Register(Sav, _ => null, _ => pref, GenTrainers.SafeLang);
         active = this;
     }
