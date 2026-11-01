@@ -1494,6 +1494,24 @@ public sealed class Orchestrator
                 bool homeErr = false;
                 try { homeErr = (await sw.RunMacroAsync("home_error_ok", new Dictionary<string, string>(), ct)).Ok; } catch (Exception ex) when (ex is not OperationCanceledException) { log("HOME 오류 창 확인 실패: " + ex.Message); }
                 saveErrAt.RemoveAll(t => DateTime.UtcNow - t > TimeSpan.FromMinutes(30));
+                // 같은 묶음이 연달아 서버 오류(에러 10015 = HOME 트래커가 유효하지 않음)면 HOME 트래커가 있는 파일 개체가 원인일 가능성이 큼
+                // → 그 개체(최대 3마리)만 빼고 나머지를 다시 옮김 (11-01 14:20~14:31: 누리레느 파일의 가짜 트래커 하나 때문에 12마리가 4번 실패)
+                if (homeErr && saveErrAt.Count >= 1)
+                {
+                    var bad = items.Where(x => gen.FromBytes(x.item.PkBytes, x.item.Format) is IHomeTrack { Tracker: not 0 }).ToList();
+                    if (bad.Count > 0 && bad.Count <= 3 && bad.Count < items.Count)
+                    {
+                        foreach (var (bo, bi) in bad)
+                        {
+                            db.Reserve(bi.Id, null);
+                            if (!Fail(bo, "HOME이 트래커를 받아들이지 않음 (에러 10015)")) continue;
+                            await notify(bo.DiscordId, $"❌ #{bo.Id} {bo.Describe} · 올려 주신 파일의 HOME 트래커를 Pokémon HOME 서버가 받아들이지 않아(에러 10015) 교환할 수 없어 신청을 취소했습니다. HOME에 한 번도 들어간 적 없는 포켓몬이라면 트래커를 지운 파일로 다시 신청해 주세요.");
+                        }
+                        log($"HOME 저장 서버 오류가 연달아 남 → HOME 트래커가 있는 {bad.Count}마리({string.Join(",", bad.Select(x => "#" + x.o.Id))})를 빼고 다시 옮김");
+                        await AdminAlert($"HOME 저장 오류(10015 추정)로 트래커가 있는 파일 신청 {string.Join(",", bad.Select(x => "#" + x.o.Id))}를 실패 처리하고 나머지를 다시 옮겨요");
+                        saveErrAt.Clear();
+                    }
+                }
                 if (homeErr && saveErrAt.Count < 3)
                 {
                     saveErrAt.Add(DateTime.UtcNow);
