@@ -153,11 +153,31 @@ def mem_mb():
                         ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
         pmc = PMC(); pmc.cb = ctypes.sizeof(PMC)
         k32 = ctypes.WinDLL("kernel32"); psapi = ctypes.WinDLL("psapi")
+        # 핸들은 64비트: restype/argtypes를 안 정하면 int(32비트)로 잘려 실패하고 0MB로 나옴
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        k32.GlobalMemoryStatusEx.argtypes = [ctypes.c_void_p]
         psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb)
         ms = MS(); ms.dwLength = ctypes.sizeof(MS); k32.GlobalMemoryStatusEx(ctypes.byref(ms))
         return int(pmc.PrivateUsage // 1048576), int(ms.ullAvailPageFile // 1048576)
     except Exception:
         return 0, 0
+
+
+def ram_free_mb():
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MS(ctypes.Structure):
+            _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD), ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = MS(); ms.dwLength = ctypes.sizeof(MS); ctypes.WinDLL("kernel32").GlobalMemoryStatusEx(ctypes.byref(ms))
+        return f"{ms.ullAvailPhys // 1048576}/{ms.ullTotalPhys // 1048576}"
+    except Exception:
+        return "?"
 
 
 def restart_when_idle(why):
@@ -377,7 +397,7 @@ def main():
         while True:
             try:
                 used, free = mem_mb()
-                with open(path, "a", encoding="utf-8") as fp: fp.write(f"{time.strftime('%m-%d %H:%M:%S')} worker={used}MB free_commit={free}MB busy={sorted(BUSY_SINCE)}\n")
+                with open(path, "a", encoding="utf-8") as fp: fp.write(f"{time.strftime('%m-%d %H:%M:%S')} worker={used}MB free_commit={free}MB free_ram={ram_free_mb()}MB busy={sorted(BUSY_SINCE)}\n")
             except Exception: pass
             time.sleep(60)
     threading.Thread(target=_memlog, daemon=True).start()
