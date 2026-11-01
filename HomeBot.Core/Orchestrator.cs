@@ -1864,8 +1864,8 @@ public sealed class Orchestrator
     private HashSet<string> BdspSent() => db.Get("bdsp_special_sent").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
     private void BdspMarkSent(string key) { var s = BdspSent(); if (s.Add(key)) db.Set("bdsp_special_sent", string.Join(",", s)); }
     /// <summary>이 개체를 받으면 안 되는 이유 (없으면 null): 이미 HOME으로 보냈거나, 같은 조합이 대기열에 이미 있음</summary>
-    /// <summary>운영자 설정: 브다샤펄 전설·준전설·환상 신청을 횟수와 상관없이 받지 않음 (기본 켜짐, 11-01 운영자 요청)</summary>
-    public bool BdspLegendBlock { get => db.Get("bdsp_legend_block") != "0"; set => db.Set("bdsp_legend_block", value ? "1" : "0"); }
+    /// <summary>운영자 설정: 브다샤펄 전설·준전설·환상 신청을 횟수와 상관없이 받지 않음 (기본 꺼짐 — 관리 명령 bdsp_legend:on/off)</summary>
+    public bool BdspLegendBlock { get => db.Get("bdsp_legend_block") == "1"; set => db.Set("bdsp_legend_block", value ? "1" : "0"); }
     private string BdspBlock(string game, PKM pk, long selfId)
     {
         if (BdspLegendBlock && pk is PB8 && Norm(game) == "BD"
