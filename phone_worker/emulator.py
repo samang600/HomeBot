@@ -36,7 +36,7 @@ def _mm(*args, timeout=60):
 
 
 def _vm_of(adb):
-    try: return str(max(0, (int(str(adb.serial).split(":")[1]) - 16384) // 32))
+    try: return str(max(0, (int(str(getattr(adb, 'port_serial', None) or adb.serial).split(":")[1]) - 16384) // 32))
     except Exception: return VM_INDEX
 
 

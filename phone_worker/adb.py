@@ -7,6 +7,7 @@ ADB = os.environ.get("ADB", "adb")
 class Adb:
     def __init__(self, serial: str | None = None, user: int | None = None):
         self.serial = serial
+        self.port_serial = serial   # 처음 받은 127.0.0.1:포트 (serial이 emulator-N으로 바뀌어도 MuMu 기기 번호 계산용)
         self.user = user      # MuMu 앱 복제본(#N1 등)은 안드로이드 다른 사용자(10, 11…)로 깔려 있음
         self.display = None   # 입력용 논리 번호 (input -d)
         self.sf_display = None  # 캡처용 SurfaceFlinger 번호 (screencap -d)
@@ -14,8 +15,41 @@ class Adb:
         self.after_launch = None   # 앱을 새로 켠 뒤 부를 함수 (MuMu 탭을 따로 창으로 떼기)
         self.scale = 1.0      # 실제 화면 폭 / 1080. 템플릿·좌표는 1080x1920 기준이라 캡처는 늘리고 터치는 줄임
         if serial and ":" in serial:
-            try: subprocess.run([ADB, "connect", serial], capture_output=True, timeout=10)
-            except Exception: pass
+            self.reconnect()
+
+    def reconnect(self):
+        """TCP 연결(127.0.0.1:포트)을 다시 맺음. MuMu를 다시 시작하면 예전 연결이 'offline'으로 남아
+        'adb connect'가 'already connected'만 답하고 명령은 'error: closed'로 실패함 → 끊고 다시 연결."""
+        def works(sr):
+            try:
+                p = subprocess.run([ADB, "-s", sr, "shell", "echo", "ok"], capture_output=True, timeout=8)
+                if p.returncode != 0: print(f"adb -s {sr}: {p.stderr.decode(errors='ignore').strip()}", flush=True)
+                return p.returncode == 0 and b"ok" in p.stdout
+            except Exception as e:
+                print(f"adb -s {sr}: {e}", flush=True)
+                return False
+        try:
+            if works(self.serial):
+                return
+            try:
+                subprocess.run([ADB, "disconnect", self.serial], capture_output=True, timeout=10)
+                subprocess.run([ADB, "connect", self.serial], capture_output=True, timeout=10)
+                for _ in range(3):
+                    time.sleep(2)
+                    if works(self.serial):
+                        return
+            except Exception as e:
+                print("adb 다시 연결 오류:", e, flush=True)
+            # 그래도 안 되면 같은 MuMu 기기의 로컬 이름(emulator-5554 …)으로 씀 (포트 16384+32·n ↔ 5554+2·n)
+            m = re.match(r"127\.0\.0\.1:(\d+)$", self.serial)
+            if m and int(m.group(1)) >= 16384 and (int(m.group(1)) - 16384) % 32 == 0:
+                alt = f"emulator-{5554 + 2 * ((int(m.group(1)) - 16384) // 32)}"
+                ok = works(alt)
+                print(f"adb {self.serial} 응답 없음 → {alt} {'로 바꿈' if ok else '도 응답 없음'}", flush=True)
+                if ok:
+                    self.serial = alt
+        except Exception as e:
+            print("adb 다시 연결 오류:", e, flush=True)
 
     def _base(self):
         return [ADB] + (["-s", self.serial] if self.serial else [])
