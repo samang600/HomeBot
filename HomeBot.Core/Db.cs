@@ -19,6 +19,7 @@ public sealed class Db : IDisposable
             CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
             CREATE INDEX IF NOT EXISTS ix_orders_status ON orders(status);
             CREATE INDEX IF NOT EXISTS ix_pool_key ON pool(key, location);
+            CREATE INDEX IF NOT EXISTS ix_pool_loc ON pool(location);
             """);
         Migrate();
     }
@@ -49,6 +50,18 @@ public sealed class Db : IDisposable
     // ---- kv
     public string Get(string k, string def = "") => Query("SELECT v FROM kv WHERE k=@k", r => r.GetString(0), ("@k", k)).FirstOrDefault() ?? def;
     public List<(string k, string v)> KvPrefix(string prefix) => Query("SELECT k, v FROM kv WHERE k LIKE @p", r => (r.GetString(0), r.GetString(1)), ("@p", prefix + "%"));
+    /// <summary>여러 키를 한 번에 (없는 키는 빠짐)</summary>
+    public Dictionary<string, string> GetMany(IEnumerable<string> keys)
+    {
+        var ks = keys.Distinct().ToList(); var d = new Dictionary<string, string>();
+        for (int i = 0; i < ks.Count; i += 500)
+        {
+            var part = ks.Skip(i).Take(500).ToList();
+            var ps = part.Select((k, j) => ($"@k{j}", (object)k)).ToArray();
+            foreach (var (k, v) in Query($"SELECT k, v FROM kv WHERE k IN ({string.Join(",", ps.Select(p => p.Item1))})", r => (r.GetString(0), r.GetString(1)), ps)) d[k] = v;
+        }
+        return d;
+    }
     public void KvDelete(string k) => Exec("DELETE FROM kv WHERE k=@k", ("@k", k));
     public void Set(string k, string v) => Exec("INSERT INTO kv(k,v) VALUES(@k,@v) ON CONFLICT(k) DO UPDATE SET v=excluded.v", ("@k", k), ("@v", v));
 
@@ -81,8 +94,6 @@ public sealed class Db : IDisposable
             ("@u", (long)user), ("@t", text), ("@d", describe), ("@k", key), ("@s", status.Db()), ("@r", route.Db()), ("@n", Now()), ("@kind", kind), ("@ch", (long)channel), ("@kj", System.Text.Json.JsonSerializer.Serialize(kp ?? new KeyPoke())), ("@g", game ?? ""));
     public void SetKey(long id, KeyPoke kp) => Exec("UPDATE orders SET key_json=@k, updated_at=@n WHERE id=@i", ("@k", System.Text.Json.JsonSerializer.Serialize(kp ?? new KeyPoke())), ("@n", Now()), ("@i", id));
     public void SetDescribe(long id, string d) => Exec("UPDATE orders SET describe=@d WHERE id=@i", ("@d", d), ("@i", id));
-    public long AddOrder(ulong user, string text, string describe, string key, Route route) =>
-        Insert("INSERT INTO orders(discord_id,text,describe,key,status,route,created_at,updated_at) VALUES(@u,@t,@d,@k,'queued',@r,@n,@n)", ("@u", (long)user), ("@t", text), ("@d", describe), ("@k", key), ("@r", route.Db()), ("@n", Now()));
     public Order GetOrder(long id) => Query($"SELECT {OrderCols} FROM orders WHERE id=@i", MapOrder, ("@i", id)).FirstOrDefault();
     /// <summary>그 시각 뒤에 들어온 신청의 게임 (빈 칸은 ""). 게임 동시 운영에서 신청 속도를 잴 때</summary>
     public List<string> GamesCreatedSince(DateTime utc) => Query("SELECT COALESCE(game,'') FROM orders WHERE created_at >= @t", r => r.GetString(0), ("@t", utc.ToString("o")));
@@ -100,9 +111,14 @@ public sealed class Db : IDisposable
             ("@s", s.Db()), ("@n", Now()), ("@e", error ?? ""), ("@o", note ?? ""), ("@i", id));
     }
     /// <summary>상태가 아직 expected일 때만 바꿈 (그 사이 취소된 신청을 되살리지 않게). 바뀌었으면 true</summary>
-    public bool SetStatusIf(long id, OrderStatus expected, OrderStatus s)
+    public bool SetStatusIf(long id, OrderStatus expected, OrderStatus s, string error = null, string note = null)
     {
-        lock (sync) { using var cmd = Cmd("UPDATE orders SET status=@s, updated_at=@n WHERE id=@i AND status=@e", ("@s", s.Db()), ("@n", Now()), ("@i", id), ("@e", expected.Db())); return cmd.ExecuteNonQuery() > 0; }
+        lock (sync)
+        {
+            using var cmd = Cmd("UPDATE orders SET status=@s, updated_at=@n" + (error != null ? ", error=@er" : "") + (note != null ? ", note=@o" : "") + " WHERE id=@i AND status=@e",
+                ("@s", s.Db()), ("@n", Now()), ("@i", id), ("@e", expected.Db()), ("@er", error ?? ""), ("@o", note ?? ""));
+            return cmd.ExecuteNonQuery() > 0;
+        }
     }
     public void SetOrderPool(long id, long? poolId) => Exec("UPDATE orders SET pool_id=@p, updated_at=@n WHERE id=@i", ("@p", poolId), ("@n", Now()), ("@i", id));
     public void SetClaimed(long id, DateTime? at) => Exec("UPDATE orders SET claimed_at=@c WHERE id=@i", ("@c", at?.ToString("o")), ("@i", id));
@@ -129,8 +145,6 @@ public sealed class Db : IDisposable
         var w = new List<string>(); if (loc != null) w.Add($"location='{loc.Value.Db()}'"); if (freeOnly) w.Add("reserved_by IS NULL");
         return Query($"SELECT {PoolCols} FROM pool" + (w.Count > 0 ? " WHERE " + string.Join(" AND ", w) : "") + " ORDER BY id", MapPool);
     }
-    public PoolItem FindFree(string key) => Query($"SELECT {PoolCols} FROM pool WHERE key=@k AND reserved_by IS NULL AND location<>'gone' ORDER BY CASE location WHEN 'home' THEN 0 WHEN 'switch' THEN 1 ELSE 2 END, id", MapPool, ("@k", key)).FirstOrDefault();
-    public int CountFree(string key) => (int)Query("SELECT COUNT(*) FROM pool WHERE key=@k AND reserved_by IS NULL AND location<>'gone'", r => r.GetInt64(0), ("@k", key))[0];
     public void Reserve(long poolId, long? orderId) => Exec("UPDATE pool SET reserved_by=@o WHERE id=@i", ("@o", orderId), ("@i", poolId));
     public void SetLocation(long poolId, Location loc, int box, int slot, bool verified = false) =>
         Exec("UPDATE pool SET location=@l, box=@b, slot=@s" + (verified ? ", verified_at=@v" : "") + " WHERE id=@i", ("@l", loc.Db()), ("@b", box), ("@s", slot), ("@v", Now()), ("@i", poolId));

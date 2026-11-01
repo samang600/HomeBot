@@ -38,20 +38,10 @@ public interface ISwitchWorker
     Task<List<HomeSlot>> ReadHomeBoxesAsync(int fromBox, int toBox, CancellationToken ct);
 }
 
-public sealed class GtsWant { public ushort Species; public string SpeciesName = ""; public int Gender = -1; public int LevelMin = 1, LevelMax = 100; }
-
 /// <summary>HOME 폰 (ADB). 파이썬 워커 서비스에 HTTP로 작업을 맡김.</summary>
 public interface IPhoneWorker
 {
     Task<bool> PingAsync(CancellationToken ct);
-    /// <summary>HOME 박스 칸(0부터)의 개체를 GTS에 맡기며 want를 요구.</summary>
-    Task<StepResult> GtsDepositAsync(int box, int slot, GtsWant want, CancellationToken ct);
-    /// <summary>GTS 교환이 이뤄졌는지 확인하고 받은 포켓몬을 박스로 들임. Vars["traded"]="1"이면 성사.</summary>
-    Task<StepResult> GtsCollectAsync(CancellationToken ct);
-    Task<StepResult> GtsWithdrawAsync(CancellationToken ct);
-    Task<StepResult> FriendTradeAsync(int box, int slot, string friendName, CancellationToken ct);
-    /// <summary>HOME 박스 칸들 놓아주기.</summary>
-    Task<StepResult> ReleaseAsync(IReadOnlyList<(int box, int slot)> slots, CancellationToken ct);
     /// <summary>역 GTS: 사용자가 맡긴 포켓몬을 검색해 HOME 박스 slot 칸과 교환. Vars: found, traded, shot.</summary>
     /// <summary>nick·nickLang: 내보낼 봇 포켓몬의 이름과 언어. 워커에 이름 인식이 있으면 칸 위치 대신 이름으로 골라냄.</summary>
     Task<StepResult> GtsFindTradeAsync(string nameEn, int gender, int level, string lang, int slot, bool fresh, CancellationToken ct, string nick = "", string nickLang = "", int nth = 0, int total = 1, string fp = "", int acct = 1);

@@ -36,12 +36,6 @@ public sealed class PhoneClient : IPhoneWorker, IVision
         catch (Exception ex) { return StepResult.Fail("폰 워커 호출 실패: " + ex.Message); }
     }
 
-    public Task<StepResult> GtsDepositAsync(int box, int slot, GtsWant want, CancellationToken ct) =>
-        Job("gts_deposit", new { box, slot, species = want.Species, species_name = want.SpeciesName, gender = want.Gender, level_min = want.LevelMin, level_max = want.LevelMax }, ct);
-    public Task<StepResult> GtsCollectAsync(CancellationToken ct) => Job("gts_collect", new { }, ct);
-    public Task<StepResult> GtsWithdrawAsync(CancellationToken ct) => Job("gts_withdraw", new { }, ct);
-    public Task<StepResult> FriendTradeAsync(int box, int slot, string friendName, CancellationToken ct) => Job("friend_trade", new { box, slot, friend = friendName }, ct);
-    public Task<StepResult> ReleaseAsync(IReadOnlyList<(int box, int slot)> slots, CancellationToken ct) => Job("release", new { slots = slots.Select(s => new { s.box, s.slot }).ToList() }, ct);
 
     public Task<StepResult> GtsFindTradeAsync(string nameEn, int gender, int level, string lang, int slot, bool fresh, CancellationToken ct, string nick = "", string nickLang = "", int nth = 0, int total = 1, string fp = "", int acct = 1) =>
         Job("gts_find_trade", new { species_name = nameEn, gender, level, lang, slot, fresh = fresh ? "1" : "0", nick, nick_lang = nickLang, nth, total, fp, acct }, ct);

@@ -143,6 +143,10 @@ public sealed class VoteCfg
     public int Needed { get; set; } = 5;
     /// <summary>게임을 바꾼 뒤 다음 전환 투표까지 최소 시간 (시간)</summary>
     public double CooldownHours { get; set; } = 2;
+    /// <summary>바로 전에 하던 게임으로 되돌리려면 더 필요한 표 (같은 두 게임이 번갈아 반복되지 않게). 0이면 같음</summary>
+    public int ExtraForPrevious { get; set; } = 2;
+    /// <summary>그 전에 하던 게임(두 번째 전)으로 바꾸려면 더 필요한 표. 0이면 같음</summary>
+    public int ExtraForRecent { get; set; } = 1;
     /// <summary>투표 채널 (0이면 봇이 만들어 기억)</summary>
     public ulong ChannelId { get; set; }
 }

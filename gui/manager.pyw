@@ -449,6 +449,7 @@ class App(tk.Tk):
         ("제한", [("Limits.PerUserDaily", "한 사람 하루 신청 수"), ("Limits.PerUserActive", "한 사람 동시 진행 신청 수"), ("Limits.ClaimTimeoutSec", "GTS 검색 제한 시간 (초)"),
                 ("Limits.GenSeconds", "생성 제한 시간 (초)"), ("Limits.MoveBatchMax", "한 번에 HOME으로 옮길 수")]),
         ("게임 전환 투표", [("Vote.Enabled", "전환 방식"), ("Vote.Needed", "투표 인원 (명)"), ("Vote.CooldownHours", "전환 뒤 다음 투표까지 (시간)"),
+                ("Vote.ExtraForPrevious", "바로 전 게임으로 되돌릴 때 더 필요한 표 (0 = 같음)"), ("Vote.ExtraForRecent", "그 전 게임으로 바꿀 때 더 필요한 표 (0 = 같음)"),
                 ("Vote.ChannelId", "투표 채널 ID (0 = 봇이 새로 만듦)")]),
         ("게임 동시 운영 (HOME 계정이 2개 이상일 때)", [("Hybrid.Enabled", "동시 운영"), ("Hybrid.Priority", "같이 열 게임 우선순위 (쉼표, 앞이 먼저: ZA, VL, SH, PLA)"),
                 ("Hybrid.PerAccountPerHour", "계정 하나가 한 시간에 처리하는 건수 (기준값)"), ("Hybrid.OpenAfterMinutes", "계정이 남는 상태가 이 분 이어지면 다른 게임 열기"),
@@ -530,6 +531,8 @@ class App(tk.Tk):
                 v.set(hit or opts[0][0]); continue
             if val == "" and key == "Switch.TransferBox": val = 1
             if val == "" and key == "Switch.FtpPort": val = 21
+            if val == "" and key == "Vote.ExtraForPrevious": val = 2
+            if val == "" and key == "Vote.ExtraForRecent": val = 1
             if val == "" and key.startswith("Hybrid."):
                 val = {"Hybrid.Priority": "ZA, VL, SH, PLA", "Hybrid.PerAccountPerHour": 28, "Hybrid.OpenAfterMinutes": 15, "Hybrid.CloseAfterMinutes": 3, "Hybrid.NoticeMinutes": 3, "Hybrid.MinOpenMinutes": 30}.get(key, "")
             v.set(", ".join(str(x) for x in val) if isinstance(val, list) else str(val))
@@ -539,7 +542,7 @@ class App(tk.Tk):
         except Exception as e: messagebox.showerror("HomeBot", f"config.json을 읽지 못했습니다: {e}"); return
         ints = {"Switch.Port", "Switch.FtpPort", "Switch.TransferBox", "Switch.Trainer.TID", "Switch.Trainer.SID",
                 "Discord.GuildId", "Discord.ChannelId", "Limits.PerUserDaily", "Limits.ClaimTimeoutSec", "Limits.GenSeconds",
-                "Limits.MoveBatchMax", "Discord.TestGuildId", "Limits.PerUserActive", "Vote.Needed", "Vote.ChannelId",
+                "Limits.MoveBatchMax", "Discord.TestGuildId", "Limits.PerUserActive", "Vote.Needed", "Vote.ExtraForPrevious", "Vote.ExtraForRecent", "Vote.ChannelId",
                 "Hybrid.PerAccountPerHour", "Hybrid.OpenAfterMinutes", "Hybrid.CloseAfterMinutes", "Hybrid.NoticeMinutes", "Hybrid.MinOpenMinutes"}
         import ipaddress
         try:
@@ -898,7 +901,7 @@ class App(tk.Tk):
 
     def t_sw_keys(self):
         if not self.bot.running(): messagebox.showinfo("HomeBot", "봇이 꺼져 있습니다"); return
-        s = simpledialog.askstring("스위치 버튼", "누를 버튼을 쉼표로 (예: B,B,HOME / A,wait1000,DDOWN)\n봇이 일하는 중에 누르면 진행이 꼬일 수 있으니 일시정지한 뒤에 쓰세요.", parent=self)
+        s = simpledialog.askstring("스위치 버튼", "누를 버튼을 쉼표로 (예: B,B,HOME / A,wait1000,DDOWN)\n!로 시작하면 sys-botbase 명령을 그대로 보냄 (예: !detachController)\n봇이 일하는 중에 누르면 진행이 꼬일 수 있으니 일시정지한 뒤에 쓰세요.", parent=self)
         if s: self._cmd("sw_keys:" + s.replace(" ", ""))
 
     def _open_file(self, p):

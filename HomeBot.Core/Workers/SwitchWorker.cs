@@ -16,6 +16,8 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
 {
     private readonly BotConfig cfg; private readonly SaveFile sav; private readonly IVision vision; private readonly Action<string> log;
     private ICommunicatorNX com; private readonly object sync = new();
+    /// <summary>세이브 파일 읽기·쓰기·되돌리기를 한 번에 하나씩 (운영자 '세이브 확인'이 넣기 도중의 반쯤 쓴 세이브를 보고 되돌리지 않게). 버튼(sync)과 따로라 FTP 재시도가 버튼을 막지 않음</summary>
+    private readonly object saveLock = new();
     private ICommunicatorNX NewCom() => new SysBotMini { IP = cfg.Switch.IP, Port = cfg.Switch.Port };
     /// <summary>게임 동시 운영: 오케스트레이터가 이번 작업(넣기·HOME 이동)의 게임을 정해 둠. 비면 기본 게임(설정)</summary>
     public string GameOverride { get; set; }
@@ -120,7 +122,7 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
         => await Task.Run(() => SaveInject(box, slots), ct);
 
     public async Task<List<PKM>> ReadBoxAsync(int box, CancellationToken ct)
-        => await Task.Run(() => { var (s, _, _) = LoadSave(); return Enumerable.Range(0, 30).Select(i => Slot(s, box, i) is { } q ? s.GetBoxSlotAtIndex(q) : null).ToList(); }, ct);
+        => await Task.Run(() => { SaveFile s; lock (saveLock) (s, _, _) = LoadSave(); return Enumerable.Range(0, 30).Select(i => Slot(s, box, i) is { } q ? s.GetBoxSlotAtIndex(q) : null).ToList(); }, ct);
 
     // ---------- 세이브 모드 (ftpsrv)
     /// <summary>박스 칸 → 세이브 안 절대 칸 번호 (레츠고는 박스가 25칸짜리라 30칸 단위로 셈). 없는 칸이면 null</summary>
@@ -132,36 +134,74 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
     }
     /// <summary>운영자 확인용: 그 게임 세이브의 박스를 읽음 (스위치 줄이 지금 다른 게임을 다루고 있어도 섞이지 않게 게임을 직접 받음)</summary>
     public Task<List<PKM>> ReadBoxOfAsync(string game, int box, CancellationToken ct) =>
-        Task.Run(() => { var (s, _, _) = LoadSave(game); return Enumerable.Range(0, 30).Select(i => Slot(s, box, i) is { } q ? s.GetBoxSlotAtIndex(q) : null).ToList(); }, ct);
-    private (SaveFile s, string path, byte[] raw) LoadSave(string game = null)
+        Task.Run(() => { SaveFile s; lock (saveLock) (s, _, _) = LoadSave(game, allowRestore: false); return Enumerable.Range(0, 30).Select(i => Slot(s, box, i) is { } q ? s.GetBoxSlotAtIndex(q) : null).ToList(); }, ct);
+    /// <summary>allowRestore: 읽기만 하는 확인(운영자)이면 false — 깨진 세이브를 봐도 되돌리지 않고 오류만</summary>
+    private (SaveFile s, string path, byte[] raw) LoadSave(string game = null, bool allowRestore = true)
     {
         game = Orchestrator.Norm(game ?? G);
         var path = Ftp.SavePath(game, cfg.Switch.SaveUser, cfg.Switch.GameUserIndex);
         var raw = Ftp.Retr(path);
-        if (!SaveUtil.TryGetSaveFile(raw.ToArray(), out var s, path)) throw new InvalidDataException($"세이브를 읽지 못했습니다 ({raw.Length}바이트): {path}");
+        if (!SaveUtil.TryGetSaveFile(raw.ToArray(), out var s, path))
+        {
+            // 쓰는 도중 연결이 끊겨 세이브가 잘린 경우(11-01 01:42: 4435304 → 4260880바이트): 이 게임의 가장 최근 정상 백업(쓰기 직전 사본)으로 되돌림
+            var restored = allowRestore ? RestoreLatestBackup(game, path, raw.Length) : null;
+            if (restored == null || !SaveUtil.TryGetSaveFile(restored.ToArray(), out s, path)) throw new InvalidDataException($"세이브를 읽지 못했습니다 ({raw.Length}바이트): {path}");
+            raw = restored;
+        }
         var want = SavOf?.Invoke(game) ?? sav;
         if (s.GetType() != want.GetType()) throw new InvalidDataException($"세이브 게임이 다릅니다: {s.GetType().Name} (봇 게임 {want.GetType().Name})");
         return (s, path, raw);
     }
-    private void Backup(byte[] raw, string tag)
+    /// <summary>스위치 세이브가 깨져 읽히지 않을 때: 그 게임의 가장 최근 백업 중 정상으로 읽히는 것을 다시 올리고 확인. 성공하면 그 내용, 아니면 null</summary>
+    private byte[] RestoreLatestBackup(string game, string path, int badLen)
+    {
+        try
+        {
+            var dir = Path.Combine(cfg.DataDir, "save_backup");
+            if (!Directory.Exists(dir)) return null;
+            foreach (var f in Directory.GetFiles(dir, game + "_*_before.bin").OrderByDescending(x => x).Take(5))
+            {
+                var b = File.ReadAllBytes(f);
+                // 잘린 경우(지금 세이브가 백업보다 짧음)만 되돌림: 게임 업데이트로 세이브 형식이 바뀌어 못 읽는 것이면 옛 백업으로 덮으면 안 됨
+                if (b.Length <= badLen) { log($"세이브를 못 읽지만 잘린 것이 아님 ({badLen}바이트 ≥ 백업 {b.Length}바이트) → 되돌리지 않음 (게임 업데이트 등 확인 필요)"); return null; }
+                // 주의: TryGetSaveFile은 넘긴 배열을 그 자리에서 복호화함 → 반드시 사본으로 확인 (원본을 올려야 함. 02:01 사례: 복호화된 채 올라감)
+                if (!SaveUtil.TryGetSaveFile(b.ToArray(), out _, path)) continue;
+                log($"⚠ 스위치 {game} 세이브가 깨져 있음 ({badLen}바이트, 읽기 실패) → 최근 백업 {Path.GetFileName(f)} ({b.Length}바이트)로 되돌림");
+                Backup(Ftp.Retr(path), "broken", game);
+                Ftp.Stor(path, b);
+                var back = Ftp.Retr(path);
+                if (back.AsSpan().SequenceEqual(b)) { log("세이브 되돌리기 확인 완료"); return b; }
+                log($"세이브 되돌리기 확인 실패 ({back.Length}/{b.Length}바이트)");
+                return null;
+            }
+            log("세이브가 깨져 있지만 되돌릴 정상 백업이 없음");
+        }
+        catch (Exception ex) { ftp = null; log("세이브 되돌리기 실패: " + ex.Message); }
+        return null;
+    }
+
+    /// <summary>세이브 사본을 data/save_backup에 남김. 실패하면 false (디스크 꽉 참 등)</summary>
+    private bool Backup(byte[] raw, string tag, string game = null)
     {
         try
         {
             var dir = Path.Combine(cfg.DataDir, "save_backup"); Directory.CreateDirectory(dir);
-            var g = Orchestrator.Norm(G);
+            var g = Orchestrator.Norm(game ?? G);
             File.WriteAllBytes(Path.Combine(dir, $"{g}_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{tag}.bin"), raw);
             foreach (var old in Directory.GetFiles(dir, g + "_*.bin").OrderByDescending(x => x).Skip(40)) File.Delete(old);   // 게임마다 최근 40개만
+            return true;
         }
-        catch (Exception ex) { log("세이브 백업 실패: " + ex.Message); }
+        catch (Exception ex) { log("세이브 백업 실패: " + ex.Message); return false; }
     }
     private StepResult SaveInject(int box, IReadOnlyList<PKM> slots)
     {
         try
         {
-            lock (sync)
+            lock (saveLock)
             {
                 var (s, path, raw) = LoadSave();
-                Backup(raw, "before");
+                // 백업이 없으면 올리다 끊겼을 때 되돌릴 곳이 없음 → 쓰지 않음 (아직 아무것도 안 바꿈)
+                if (!Backup(raw, "before")) return StepResult.Fail("세이브 쓰기 실패: 쓰기 전 백업을 남기지 못해 쓰지 않음 (PC 디스크 공간 확인)");
                 int first = FirstSlotOf(cfg, G), put = 0;
                 for (int i = first; i < 30; i++)
                 {
@@ -181,9 +221,25 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
                 if (s is SAV7b b7) b7.FixStoragePreWrite();
                 try { s.CurrentBox = box; } catch { }   // HOME이 이 박스를 먼저 보여 주게
                 var outb = s.Write().ToArray();
-                Ftp.Stor(path, outb);
-                var back = Ftp.Retr(path);
-                if (!back.AsSpan().SequenceEqual(outb)) { Backup(back, "mismatch"); throw new IOException($"올린 세이브를 다시 받아 보니 다릅니다 ({back.Length}/{outb.Length}바이트)"); }
+                try
+                {
+                    // 올리는 중 끊기면 스위치 세이브가 잘린 채 남음 → 다시 연결해 같은 내용을 두 번까지 더 올림
+                    for (int attempt = 0; ; attempt++)
+                    {
+                        try { Ftp.Stor(path, outb); break; }
+                        catch (Exception sx) when (attempt < 2) { ftp = null; log($"세이브 올리기 중 끊김 ({sx.Message}) → 다시 올림 ({attempt + 1}/2)"); Thread.Sleep(1500); }
+                    }
+                    var back = Ftp.Retr(path);
+                    if (!back.AsSpan().SequenceEqual(outb)) { Backup(back, "mismatch"); throw new IOException($"올린 세이브를 다시 받아 보니 다릅니다 ({back.Length}/{outb.Length}바이트)"); }
+                }
+                catch
+                {
+                    // 끝내 실패: 스위치 세이브가 잘렸거나 다른 내용일 수 있음 → 받아 둔 원래 세이브를 바로 다시 올림 (디스크 백업에 기대지 않음)
+                    ftp = null;
+                    try { Ftp.Stor(path, raw); var chk = Ftp.Retr(path); log(chk.AsSpan().SequenceEqual(raw) ? "세이브 쓰기 실패 → 원래 세이브로 되돌려 올림" : $"세이브 쓰기 실패 → 원래 세이브로 되돌리기 확인 실패 ({chk.Length}/{raw.Length}바이트)"); }
+                    catch (Exception rx) { ftp = null; log("세이브 쓰기 실패 → 원래 세이브 되돌리기도 실패: " + rx.Message); }
+                    throw;
+                }
                 return StepResult.Pass($"세이브 박스 {box + 1}에 {put}마리 씀 ({Path.GetFileName(path)})");
             }
         }
@@ -213,6 +269,9 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
         }
     }
     public Task ClickAsync(string button, CancellationToken ct) => Task.Run(() => Raw($"click {button}", false), ct);
+    public Task TouchAsync(int x, int y, CancellationToken ct) => Task.Run(() => Raw($"touch {x} {y}", false), ct);
+    /// <summary>운영자용: sys-botbase 원시 명령 (detachController 등)</summary>
+    public Task RawCommandAsync(string cmd, CancellationToken ct) => Task.Run(() => Raw(cmd, false), ct);
     public async Task HoldAsync(string button, int ms, CancellationToken ct) { await Task.Run(() => Raw($"press {button}", false), ct); await Task.Delay(ms, ct); await Task.Run(() => Raw($"release {button}", false), ct); }
     public async Task StickAsync(string stick, short x, short y, int ms, CancellationToken ct) { await Task.Run(() => Raw($"setStick {stick} {x} {y}", false), ct); await Task.Delay(ms, ct); await Task.Run(() => Raw($"setStick {stick} 0 0", false), ct); }
     /// <summary>화면 캡처. 게임이 켜지는 중 등 캡처가 안 되는 순간에는 빈 배열 (= 화면 확인 실패로 처리하고 다시 시도).</summary>
@@ -289,7 +348,7 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
         //  깡계(free): 항상 HOME 1번 칸부터 '바꾸기' — 그 칸에 있던 포켓몬(GTS로 받은 열쇠 포켓몬)은 게임 박스로 내려오고, 다음 주입 때 덮어써짐
         //  프리미엄: HOME Live로 빈 칸을 읽어 거기에
         List<int> free;
-        if (cfg.Home.IsFree) free = Enumerable.Range(0, 30).Where(i => !KeepHomeCells.Contains(i)).ToList();
+        if (cfg.Home.IsFree) free = null;   // 깡계는 BulkMoveAsync가 칸을 정함
         else
         {
             List<HomeSlot> home;
@@ -312,20 +371,7 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
         // 1마리여도 같은 방식: 받은 포켓몬은 '함께 놓아주기'로 한 번에, 옮기기는 범위 선택(1칸짜리 네모)으로 (한 마리씩 놓아주면 칸마다 8초)
         if (cfg.Home.IsFree && from.Count >= 1)
             return await BulkMoveAsync(from, gameBox, homeBox, ct);
-        // 4-1) 깡계: 놓을 HOME 칸에 포켓몬(지난 GTS에서 받은 것)이 있으면 먼저 놓아줌 — 바이올렛에 없는 포켓몬이면 맞바꾸기가 거부되기 때문
-        //      칸이 찼는지는 화면으로 판단: A를 눌러 포켓몬 메뉴가 뜨면 포켓몬이 있는 것
-        if (cfg.Home.IsFree)
-        {
-            // 지난 묶음이 더 컸으면 그때 받은 포켓몬이 뒤 칸에 남아 있으니, 묶음 최대 수만큼(1~N번 칸) 늘 비움. 빈 칸은 건너뜀
-            int clear = Math.Max(from.Count, Math.Clamp(cfg.Limits.MoveBatchMax, 1, 30));
-            foreach (var hs in free.Take(clear))
-            {
-                await Go(hs / 6, hs % 6);
-                var rr = await ReleaseHereAsync(hs / 6, hs % 6, ct);
-                if (!rr.Ok) return rr;
-                log(rr.Message.Length > 0 ? $"HOME {homeBox}-{hs + 1}: {rr.Message}" : $"HOME {homeBox}-{hs + 1} 놓아줌");
-            }
-        }
+        // 4-1) 프리미엄: 빈 칸에 한 마리씩 (깡계는 위에서 끝남)
         for (int k = 0; k < from.Count; k++)
         {
             int g = from[k], h = free[k];
@@ -353,33 +399,38 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
     private static (int x, int y) CellXY(int row, int col) => ((int)(95 + 92.2 * (col % 6)) + (col >= 6 ? 628 : 0), 163 + 75 * row);
 
     /// <summary>HOME 박스 찬 칸에 차례로 커서를 올려 화면 아래 정보 칸의 숫자(레벨·능력치)를 읽고, 남은 봇 개체(KeepPks)와 맞는 칸을 찾음.
-    /// 레벨이 맞으면 2점, 능력치 하나 맞을 때마다 1점 → 5점 이상이면 그 개체. 모두 찾으면 바로 멈춤.</summary>
-    private async Task<(HashSet<int> keep, Dictionary<int, int> found)> ScanKeepByScreenAsync(bool[] busy, Func<int, int, Task> go, CancellationToken ct)
+    /// 레벨이 맞으면 2점, 능력치 하나 맞을 때마다 1점 → 7점 이상(8점 만점)이고 그 칸에 7점 넘는 다른 개체가 없을 때만 그 개체. 모두 찾으면 바로 멈춤.
+    /// (5점이면 성격만 다른 같은 종 둘이 서로 바뀌어 기록될 수 있음 · 커서가 한 칸 밀리면 모든 칸이 어긋나므로 커서 위치를 화면으로 확인한 칸만 읽음)</summary>
+    private async Task<(HashSet<int> keep, Dictionary<int, int> found, bool ambiguous)> ScanKeepByScreenAsync(bool[] busy, Func<int, int, Task> go, Func<Task<(bool found, int cell)>> cursorAt, CancellationToken ct)
     {
-        var keep = new HashSet<int>(); var found = new Dictionary<int, int>();
+        var keep = new HashSet<int>(); var found = new Dictionary<int, int>(); bool ambiguous = false;
         var want = KeepPks.Select((pk, i) => (i, lv: (int)pk.CurrentLevel, st: pk.GetStats(pk.PersonalInfo).Select(x => (int)x).ToArray())).ToList();
         var sw0 = System.Diagnostics.Stopwatch.StartNew(); var seen = new List<string>();
         for (int c = 0; c < 30 && found.Count < KeepPks.Count; c++)
         {
             if (!busy[c]) continue;
             await go(c / 6, c % 6); await Task.Delay(350, ct);
+            var (cf, at) = await cursorAt();
+            if (cf && at != c) { seen.Add($"{c + 1}:커서{at + 1}"); continue; }   // 버튼이 씹혀 다른 칸을 보고 있음 (cursorAt이 위치를 다시 맞춰 둠)
             var img = await ScreenshotAsync(ct);
             if (img.Length == 0) continue;
             var text = await vision.OcrAsync(img, (10, 568, 1260, 122), ct);
             var nums = System.Text.RegularExpressions.Regex.Matches(text ?? "", @"\d+").Select(m => int.Parse(m.Value)).Where(n => n <= 999).ToList();
             seen.Add($"{c + 1}:[{string.Join(",", nums.Take(8))}]");
-            int best = -1, bestSc = 0;
+            int best = -1, bestSc = 0, hits = 0;
             foreach (var w in want.Where(w => !found.ContainsKey(w.i)))
             {
                 var pool = new List<int>(nums); int sc = 0;
                 if (pool.Remove(w.lv)) sc += 2;
                 foreach (var s in w.st) if (pool.Remove(s)) sc++;
+                if (sc >= 7) hits++;
                 if (sc > bestSc) { bestSc = sc; best = w.i; }
             }
-            if (best >= 0 && bestSc >= 5) { found[best] = c; keep.Add(c); }
+            if (hits > 1) { ambiguous = true; keep.Add(c); seen[^1] += "(둘 이상 맞음)"; continue; }   // 어느 개체인지 모름 → 칸은 지키되 기록은 고치지 않음
+            if (best >= 0 && bestSc >= 7) { found[best] = c; keep.Add(c); }
         }
         log($"남은 봇 개체 화면 확인: {found.Count}/{KeepPks.Count} ({sw0.Elapsed.TotalSeconds:F0}초) " + string.Join(" ", seen.Take(30)));
-        return (keep, found);
+        return (keep, found, ambiguous);
     }
 
     private async Task SaveShot(byte[] img, string tag)
@@ -455,7 +506,7 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
             for (int i = 0; i < KeepPks.Count; i++)
             {
                 var pk = KeepPks[i];
-                var h = rd.FirstOrDefault(x => x.Pk != null && x.Pk.Species == pk.Species && x.Pk.EncryptionConstant == pk.EncryptionConstant && !keep.Contains(x.Slot) && x.Slot is >= 0 and < 30 && busy[x.Slot]);
+                var h = rd.FirstOrDefault(x => x.Pk != null && x.Pk.Species == pk.Species && x.Pk.EncryptionConstant == pk.EncryptionConstant && !keep.Contains(x.Slot) && x.Slot is >= 0 and < 30);   // 칸 밝기(busy)는 보지 않음: 연한 포켓몬(마빌크 등)은 빈 칸처럼 보임
                 if (h != null) { keep.Add(h.Slot); KeepFound[i] = h.Slot; }
             }
             if (KeepFound.Count < KeepPks.Count && LastAltRead.Count > 0)
@@ -464,7 +515,7 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
                 for (int i = 0; i < KeepPks.Count; i++)
                 {
                     var pk = KeepPks[i];
-                    var h = LastAltRead.FirstOrDefault(x => x.Pk != null && x.Pk.Species == pk.Species && x.Pk.EncryptionConstant == pk.EncryptionConstant && !keep2.Contains(x.Slot) && x.Slot is >= 0 and < 30 && busy[x.Slot]);
+                    var h = LastAltRead.FirstOrDefault(x => x.Pk != null && x.Pk.Species == pk.Species && x.Pk.EncryptionConstant == pk.EncryptionConstant && !keep2.Contains(x.Slot) && x.Slot is >= 0 and < 30);
                     if (h != null) { keep2.Add(h.Slot); found2[i] = h.Slot; }
                 }
                 log($"남은 봇 개체 찾기: 기본 위치 {KeepFound.Count}/{KeepPks.Count} · 다른 위치 {found2.Count}/{KeepPks.Count}");
@@ -473,21 +524,23 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
             if (KeepFound.Count < KeepPks.Count)
             {
                 // HOME 데이터가 예전 상태라 못 찾음 → 화면으로 확인: 찬 칸마다 커서를 올려 아래 정보 칸(레벨·능력치)을 읽고 남은 봇 개체와 맞춰 봄
-                var (k2, f2) = await ScanKeepByScreenAsync(busy, Go, ct);
+                var (k2, f2, amb) = await ScanKeepByScreenAsync(busy, Go, async () => (await SyncCursor(), cc < 6 ? cr * 6 + cc : -1), ct);
                 await Go(0, 0); await Task.Delay(200, ct);
-                if (f2.Count > KeepFound.Count) { keep = k2; KeepFound = f2; }
+                if (amb) KeepAmbiguous = true;
+                if (f2.Count > KeepFound.Count || amb) { keep.UnionWith(k2); if (f2.Count > KeepFound.Count) KeepFound = f2; }
             }
             if (KeepFound.Count == KeepPks.Count)
             {
-                var extra = dbKeep.Where(c => c is >= 0 and < 30 && busy[c] && !keep.Contains(c)).ToList();
+                // 기록상 칸은 화면에 비어 보여도 지킴 (연한 포켓몬은 빈 칸처럼 보임 · 정말 비었으면 그 칸 하나를 덜 쓸 뿐)
+                var extra = dbKeep.Where(c => c is >= 0 and < 30 && !keep.Contains(c)).ToList();
                 foreach (var c in extra) keep.Add(c);
-                KeepAmbiguous = extra.Count > 0;
+                KeepAmbiguous |= extra.Any(c => busy[c]);
                 KeepHomeCells = keep;
                 log($"남은 봇 개체 칸 확인: {string.Join(",", keep.OrderBy(x => x).Select(x => x + 1))}" + (extra.Count > 0 ? $" (기록상 칸 {string.Join(",", extra.Select(x => x + 1))}도 포켓몬이 있어 함께 지킴)" : ""));
             }
             else
             {
-                KeepHomeCells = Enumerable.Range(0, 30).Where(i => busy[i]).ToHashSet(); KeepUnverified = true;
+                KeepHomeCells = Enumerable.Range(0, 30).Where(i => busy[i]).Concat(dbKeep.Where(c => c is >= 0 and < 30)).ToHashSet(); KeepUnverified = true;
                 log($"남은 봇 개체 칸을 HOME 데이터로 확인 못 함 (읽음 {rd.Count}마리) → 찬 칸 {KeepHomeCells.Count}개는 그대로 두고 빈 줄에 채움");
             }
         }
@@ -541,11 +594,30 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
         {
             int f0 = targets[0];
             await Go(f0 / 6, f0 % 6); await Task.Delay(250, ct);
-            await ClickAsync("A", ct);
-            if (!await See("home_move_menu", 3000, 0.8)) { await SaveShot(null, "release_nomenu"); return StepResult.Fail("놓아주기: 포켓몬 메뉴가 열리지 않음 (화면 저장됨)"); }
-            for (int i = 0; i < 4; i++) { await ClickAsync("DDOWN", ct); await Task.Delay(150, ct); }
-            await ClickAsync("A", ct);                                           // 놓아준다
-            if (!await See("home_release_ask", 3000)) { await ClickAsync("B", ct); await ClickAsync("B", ct); return StepResult.Fail("놓아주기: '함께 놓아준다' 창이 안 뜸"); }
+            // 메뉴 → 놓아준다 → '1마리만/함께' 창. 버튼이 가끔 씹혀(메뉴가 늦게 열리거나 아래 칸 이동이 빠짐) 창이 안 뜨면 물러났다가 천천히 다시 시도
+            bool asked = false;
+            for (int att = 0; att < 3 && !asked; att++)
+            {
+                await ClickAsync("A", ct);
+                if (!await See("home_move_menu", 3000, 0.8)) { await SaveShot(null, "release_nomenu"); return StepResult.Fail("놓아주기: 포켓몬 메뉴가 열리지 않음 (화면 저장됨)"); }
+                await Task.Delay(250 + att * 200, ct);
+                for (int i = 0; i < 4; i++) { await ClickAsync("DDOWN", ct); await Task.Delay(150 + att * 150, ct); }
+                await Task.Delay(att * 200, ct);
+                await ClickAsync("A", ct);                                       // 놓아준다
+                if (await See("home_release_ask", 3000 + att * 1000)) { asked = true; break; }
+                await SaveShot(null, $"release_noask{att + 1}");
+                log($"놓아주기: '함께 놓아준다' 창이 안 떠서 물러났다가 다시 시도 ({att + 1}/3)");
+                // 열린 것(메뉴·상태 화면·마킹 등)을 닫고 박스 화면으로 돌아오기
+                for (int b = 0; b < 4; b++)
+                {
+                    await ClickAsync("B", ct); await Task.Delay(500, ct);
+                    var im = await ScreenshotAsync(ct);
+                    if (im.Length > 0 && !(await vision.MatchAsync(im, "home_move_menu", 0.8, ct)).found && !(await vision.MatchAsync(im, "home_release_ask", 0.85, ct)).found
+                        && (await vision.MatchAsync(im, "home_boxes", 0.85, ct)).found) break;
+                }
+                await Task.Delay(400, ct);
+            }
+            if (!asked) { await ClickAsync("B", ct); await ClickAsync("B", ct); return StepResult.Fail("놓아주기: '함께 놓아준다' 창이 세 번 다 안 뜸 (화면 저장됨)"); }
             await ClickAsync("DDOWN", ct); await Task.Delay(200, ct);
             await ClickAsync("A", ct);                                           // 함께 놓아준다
             if (!await See("home_multi_bar", 3000)) { await SaveShot(null, "multi_nobar"); await ClickAsync("B", ct); await ClickAsync("B", ct); return StepResult.Fail("놓아주기: 여러 마리 고르기 화면이 안 뜸"); }
@@ -648,6 +720,19 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
         try { hb = await Busy(0); gb = await Busy(6); } catch (Exception ex) { return StepResult.Fail("이동 확인 실패: " + ex.Message); }
         var notMoved = from.Where(g => gb[g]).ToList();
         var missing = from.Where(g => !hb[Cell(g)]).ToList();
+        // 연한 색 포켓몬(마빌크 등)은 칸 밝기만으로는 빈 칸처럼 보임 → 커서를 그 칸에 올려 아래 정보 칸(이름·레벨 줄)에 무언가 나오는지로 다시 확인
+        // (20261031_032057: HOME 1번 칸 마빌크를 '없음'으로 봐 멈췄음. 정보 줄은 빈 칸이면 표준편차 0.3, 포켓몬이면 30)
+        if (missing.Count > 0 && notMoved.Count == 0 && await SyncCursor())   // 내려놓은 뒤 커서 위치부터 맞춤
+        {
+            foreach (var g in missing.ToList())
+            {
+                int hc = Cell(g);
+                await Go(hc / 6, hc % 6); await Task.Delay(450, ct);
+                var im = await ScreenshotAsync(ct);
+                if (im.Length > 0 && (await vision.MatchAsync(im, "@busy:20,575,1240,28", 0.10, ct)).found)
+                { missing.Remove(g); log($"HOME {homeBox}-{hc + 1}: 칸이 흐려 보였지만 정보 칸으로 포켓몬 확인"); }
+            }
+        }
         if (notMoved.Count > 0 || missing.Count > 0)
         {
             await SaveShot(null, "bulk_move_bad");
@@ -686,15 +771,32 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
             if (!busy) await Task.Delay(150, ct);
         }
         if (!busy) return StepResult.Pass("빈 칸");
-        await ClickAsync("A", ct);
-        if (!await See("home_move_menu", 3000, 0.8))
+        bool asked = false;
+        for (int att = 0; att < 3 && !asked; att++)
         {
-            try { var shot = await ScreenshotAsync(ct); if (shot.Length > 0) { Directory.CreateDirectory(cfg.ShotDir); File.WriteAllBytes(Path.Combine(cfg.ShotDir, $"{DateTime.Now:yyyyMMdd_HHmmss}_release_nomenu.jpg"), shot); } } catch { }
-            return StepResult.Fail("놓아주기: 포켓몬이 있는데 메뉴가 열리지 않음 (화면 저장됨)");
+            await ClickAsync("A", ct);
+            if (!await See("home_move_menu", 3000, 0.8))
+            {
+                await SaveShot(null, "release_nomenu");
+                return StepResult.Fail("놓아주기: 포켓몬이 있는데 메뉴가 열리지 않음 (화면 저장됨)");
+            }
+            await Task.Delay(250 + att * 200, ct);
+            for (int i = 0; i < 4; i++) { await ClickAsync("DDOWN", ct); await Task.Delay(150 + att * 150, ct); }
+            await Task.Delay(att * 200, ct);
+            await ClickAsync("A", ct);
+            if (await See("home_release_ask", 3000 + att * 1000)) { asked = true; break; }
+            await SaveShot(null, $"release1_noask{att + 1}");
+            log($"놓아주기: '1마리만 놓아준다' 창이 안 떠서 물러났다가 다시 시도 ({att + 1}/3)");
+            for (int b = 0; b < 4; b++)
+            {
+                await ClickAsync("B", ct); await Task.Delay(500, ct);
+                var im = await ScreenshotAsync(ct);
+                if (im.Length > 0 && !(await vision.MatchAsync(im, "home_move_menu", 0.8, ct)).found && !(await vision.MatchAsync(im, "home_release_ask", 0.85, ct)).found
+                    && (await vision.MatchAsync(im, "home_boxes", 0.85, ct)).found) break;
+            }
+            await Task.Delay(400, ct);
         }
-        for (int i = 0; i < 4; i++) { await ClickAsync("DDOWN", ct); await Task.Delay(150, ct); }
-        await ClickAsync("A", ct);
-        if (!await See("home_release_ask", 3000)) { await ClickAsync("B", ct); await ClickAsync("B", ct); return StepResult.Fail("놓아주기: '1마리만 놓아준다' 창이 안 뜸"); }
+        if (!asked) { await ClickAsync("B", ct); await ClickAsync("B", ct); return StepResult.Fail("놓아주기: '1마리만 놓아준다' 창이 세 번 다 안 뜸 (화면 저장됨)"); }
         await ClickAsync("A", ct);                                   // 1마리만 놓아준다
         if (!await See("home_release_confirm", 3000)) { await ClickAsync("B", ct); await ClickAsync("B", ct); return StepResult.Fail("놓아주기: 확인 창이 안 뜸"); }
         await ClickAsync("DUP", ct); await Task.Delay(200, ct);     // 기본은 '취소' → 위의 '놓아준다'
@@ -719,7 +821,7 @@ public sealed class SwitchWorker : ISwitchWorker, IMacroDevice
     public async Task<List<HomeSlot>> ReadHomeBoxesAsync(int fromBox, int toBox, CancellationToken ct)
     {
         // HOME Live는 자기 소켓을 쓰므로 게임용 연결은 잠시 끊음
-        bool had = Connected; Disconnect();
+        Disconnect();
         var exec = new DeviceExecutor<DeviceState>(new DeviceState { Connection = new SwitchConnectionConfig { IP = cfg.Switch.IP, Port = cfg.Switch.Port, Protocol = SwitchProtocol.WiFi }, InitialRoutine = RoutineType.ReadWrite });
         var result = new List<HomeSlot>();
         try

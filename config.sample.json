@@ -22,7 +22,8 @@
   },
   "Phone": { "Enabled": true, "Url": "http://127.0.0.1:8765", "TimeoutSec": 300 },
   "Limits": { "PerUserDaily": 5, "PerUserActive": 1, "ClaimTimeoutSec": 600, "GenSeconds": 90, "MoveBatchMax": 12 },
-  "Vote": { "Enabled": true, "Needed": 5, "CooldownHours": 2, "ChannelId": 0 },
+  // 게임 전환 투표: Needed명이 모이면 전환. 바로 전에 했던 게임은 ExtraForPrevious명, 그 전 게임은 ExtraForRecent명 더 필요 (0이면 같음 · 같은 두 게임이 번갈아 반복되지 않게)
+  "Vote": { "Enabled": true, "Needed": 5, "CooldownHours": 2, "ExtraForPrevious": 2, "ExtraForRecent": 1, "ChannelId": 0 },
   // 게임 동시 운영 (HOME 계정이 2개 이상일 때): 기본 게임 신청이 적어 계정이 남으면 Priority 순서로 다른 게임을 같이 받고, 많아지면 다시 마감
   "Hybrid": { "Enabled": true, "Priority": [ "ZA", "VL", "SH", "PLA" ], "PerAccountPerHour": 28, "OpenAfterMinutes": 15, "CloseAfterMinutes": 3, "NoticeMinutes": 3, "MinOpenMinutes": 30 },
   "DefaultRoute": "home_gts",

@@ -62,7 +62,13 @@ public sealed class Orchestrator
     private int? UserOf(int acct) => acct >= 2 ? HomeUserOf(acct) : null;
     private int AcctOf(long orderId) => int.TryParse(db.Get($"acct:{orderId}"), out var a) && a >= 1 && a <= MaxAccounts ? a : 1;
     private int PoolAcct(long poolId) => int.TryParse(db.Get($"pacct:{poolId}"), out var a) && a >= 1 && a <= MaxAccounts ? a : 1;
-    private List<Order> HomeOf(int a) => db.Orders(OrderStatus.InHome, OrderStatus.Trading).Where(o => AcctOf(o.Id) == a).ToList();
+    private List<Order> HomeOf(int a)
+    {
+        var l = db.Orders(OrderStatus.InHome, OrderStatus.Trading);
+        if (l.Count == 0) return l;
+        var kv = db.GetMany(l.Select(o => $"acct:{o.Id}"));   // 신청마다 따로 읽지 않고 한 번에 (휴대폰 줄이 자주 부름)
+        return l.Where(o => (kv.TryGetValue($"acct:{o.Id}", out var v) && int.TryParse(v, out var x) && x >= 1 && x <= MaxAccounts ? x : 1) == a).ToList();
+    }
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, bool> freshOf = new(Enumerable.Range(1, MaxAccounts).ToDictionary(k => k, _ => true));
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> prelaunchOf = new(Enumerable.Range(1, MaxAccounts).ToDictionary(k => k, _ => DateTime.MinValue));
     /// <summary>두 계정 휴대폰 교환을 동시에 (MuMu에서 두 앱 창이 따로 떠 있어야 함). 관리 창 명령 phone_parallel:on/off</summary>
@@ -75,6 +81,7 @@ public sealed class Orchestrator
         foreach (var k in keys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (k.StartsWith("wait")) { await Task.Delay(int.TryParse(k[4..], out var ms) ? ms : 1000); continue; }
+            if (k.StartsWith('!')) { await w.RawCommandAsync(k[1..], CancellationToken.None); await Task.Delay(600); continue; }   // !detachController 같은 sys-botbase 원시 명령
             await w.ClickAsync(k.ToUpperInvariant(), CancellationToken.None); await Task.Delay(600);
         }
         log("운영자: 스위치 버튼 " + keys);
@@ -166,6 +173,7 @@ public sealed class Orchestrator
     public string OtherGame => VoteTarget ?? (Games.Length > 1 ? Games[(Array.IndexOf(Games, Game) + 1) % Games.Length] : Game);
     /// <summary>게임 전환 뒤 봇이 다시 켜지는 동안 (신청을 받지 않음)</summary>
     private bool restarting;
+    private readonly List<DateTime> saveErrAt = new();
     /// <summary>지금 게임 신청을 받는 중인지 (마감·전환 요청·전환 중이면 false)</summary>
     public bool AcceptingOrders => !restarting && !IntakeClosed && !switchRequested;
     /// <summary>게임 전환 뒤 봇을 다시 켜야 할 때 (디스코드 쪽이 프로세스를 끝내면 관리 창이 다시 켬)</summary>
@@ -186,6 +194,68 @@ public sealed class Orchestrator
     /// <summary>시간마다 자동 교대 (투표 방식이면 쉼)</summary>
     private bool Timed => cfg.Rotation.Enabled && !VoteMode;
     public int VoteNeeded => FreeSwitch ? 1 : Math.Max(1, cfg.Vote.Needed);
+    /// <summary>그 게임으로 바꾸는 데 필요한 표: 기본 + 바로 전 게임이면 ExtraForPrevious, 그 전 게임이면 ExtraForRecent (줄지는 않음)</summary>
+    public int VoteNeededFor(string target)
+    {
+        if (FreeSwitch) return 1;
+        int n = Math.Max(1, cfg.Vote.Needed);
+        if (string.IsNullOrEmpty(target)) return n;
+        target = Norm(target);
+        var h = GameHistory();
+        var prev = h.Select(x => x.game).Where(g => g != Game).Distinct().Take(2).ToList();   // 바로 전 게임, 그 전 게임
+        if (prev.Count > 0 && prev[0] == target) return n + Math.Max(0, cfg.Vote.ExtraForPrevious);
+        if (prev.Count > 1 && prev[1] == target) return n + Math.Max(0, cfg.Vote.ExtraForRecent);
+        return n;
+    }
+    /// <summary>지난 게임들 (최근 것부터): 게임이 바뀔 때마다 kv game_hist에 '게임|끝난 시각' 기록 (관리 창에서 바꾼 것도 다음 확인 때 잡힘)</summary>
+    public List<(string game, DateTime ended)> GameHistory()
+    {
+        lock (voteLock)
+        {
+            var cur = Game;
+            if (db.Get("game_hist_v") != "2") { db.Set("game_hist", ""); db.Set("game_hist_cur", ""); db.Set("game_hist_v", "2"); }   // 처음 넣은 기록(관리 창 전환을 빠뜨림)은 다시 만듦
+            var seen = db.Get("game_hist_cur");
+            var list = db.Get("game_hist").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Split('|'))
+                .Where(p => p.Length == 2 && DateTimeOffset.TryParse(p[1], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out _))
+                .Select(p => (game: p[0], ended: DateTimeOffset.Parse(p[1], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal).UtcDateTime)).ToList();
+            if (seen.Length == 0)
+            {
+                // 처음: 전환 투표 기록(data/vote_log.txt '[MM-dd HH:mm] 전환 투표 A → B')으로 지난 게임을 채움
+                if (list.Count == 0)
+                {
+                    try
+                    {
+                        var byKo = SaveGames.ToDictionary(GameKo, g => g);
+                        var rx = new System.Text.RegularExpressions.Regex(@"^\[(\d\d)-(\d\d) (\d\d):(\d\d)\] 전환 투표 (.+?) → (.+?)(?: \(|$)");
+                        var f = Path.Combine(cfg.DataDir, "vote_log.txt");
+                        var evs = new List<(string from, DateTime at)>(); string lastTo = null;
+                        foreach (var line in File.Exists(f) ? File.ReadAllLines(f) : [])
+                        {
+                            var m = rx.Match(line.Trim()); if (!m.Success || !byKo.TryGetValue(m.Groups[5].Value.Trim(), out var from)) continue;
+                            var at = new DateTime(DateTime.Now.Year, int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value), int.Parse(m.Groups[4].Value), 0, DateTimeKind.Local);
+                            if (at > DateTime.Now.AddDays(1)) at = at.AddYears(-1);
+                            evs.Add((from, at.ToUniversalTime()));
+                            lastTo = byKo.TryGetValue(m.Groups[6].Value.Trim(), out var to) ? to : null;
+                        }
+                        // 마지막 투표 뒤 관리 창에서 바꾼 경우: 그 투표로 정해진 게임이 바로 전 게임
+                        if (lastTo != null && lastTo != cur) evs.Add((lastTo, GameSince.ToLocalTime().ToUniversalTime()));
+                        // 투표가 정해진 뒤 남은 신청을 끝내고 바뀌므로 끝난 시각은 대략 그 무렵 (마지막 것은 지금 게임 시작 시각)
+                        for (int k = evs.Count - 1; k >= 0 && list.Count < 10; k--) list.Add((evs[k].from, k == evs.Count - 1 ? GameSince : evs[k].at));
+                    }
+                    catch { }
+                    if (list.Count == 0 && LastVote is { } lv && Norm(lv.to) == cur && Norm(lv.from) != cur) list.Insert(0, (Norm(lv.from), GameSince));
+                }
+            }
+            else if (seen != cur) list.Insert(0, (seen, GameSince));   // 게임이 바뀜: 그 게임은 지금 게임이 시작될 때 끝남
+            if (seen != cur || db.Get("game_hist").Length == 0 && list.Count > 0)
+            {
+                list = list.Take(10).ToList();
+                db.Set("game_hist", string.Join(",", list.Select(x => $"{x.game}|{x.ended:o}")));
+                db.Set("game_hist_cur", cur);
+            }
+            return list;
+        }
+    }
     /// <summary>다음 전환 투표가 열리는 시각 (마지막으로 게임을 바꾼 때 + 쿨타임)</summary>
     public DateTime VoteOpenAt => GameSince + TimeSpan.FromHours(FreeSwitch ? 0 : Math.Max(0, cfg.Vote.CooldownHours));
     public bool SwitchRequested => switchRequested;
@@ -233,8 +303,9 @@ public sealed class Orchestrator
             if (!had) l.Add((uid, target));
             db.Set("vote_game", Game); db.Set("vote_users", string.Join(",", l.Select(x => $"{x.uid}:{x.game}")));
             int n = l.Count(x => x.game == target);
-            if (had) return ($"**{GameKo(target)}** 투표를 취소했어요 ({n}/{VoteNeeded})", false);
-            if (n < VoteNeeded) return ($"**{GameKo(target)}**로 바꾸기에 투표했어요 ({n}/{VoteNeeded}). 다시 누르면 취소돼요.", false);
+            int need = VoteNeededFor(target);
+            if (had) return ($"**{GameKo(target)}** 투표를 취소했어요 ({n}/{need})", false);
+            if (n < need) return ($"**{GameKo(target)}**로 바꾸기에 투표했어요 ({n}/{need}). 다시 누르면 취소돼요." + (need > VoteNeeded ? $" (최근에 했던 게임이라 {need}명이 필요해요)" : ""), false);
             db.Set("vote_target", target);
             log($"전환 투표 {n}명 달성: {GameKo(Game)} → {GameKo(target)}");
             RecordVote(Game, target, l);
@@ -662,6 +733,7 @@ public sealed class Orchestrator
         }
         var (pk, msg) = GenOf(fg).FromFile(data, fileName);
         if (pk == null) return (false, msg, 0);
+        if (BdspBlock(fg, pk, 0) is { } bb) return (false, bb, 0);
         var d = (pk.IsShiny ? "이로치 " : "") + gen.Strings.Species[pk.Species] + $" Lv.{pk.CurrentLevel} (파일)";
         var id = db.AddOrder(user, fileName, d, $"file:{pk.Species}", Route.HomeGts, "file", channel, key, OrderStatus.Generated, game: fg);
         var pid = db.AddPool(GenService.Bytes(pk), pk.Extension, pk.Species, pk.Form, pk.IsShiny, $"file:{id}");
@@ -723,7 +795,7 @@ public sealed class Orchestrator
         db.SetKey(o.Id, kp);
         ph.TryRemove(o.Id, out _);                                                        // '못 찾음' 안내를 다시 할 수 있게
         noneSinceDm.TryRemove(o.Id, out _); lock (toldRetry) toldRetry.Remove(o.Id);
-        skipRounds.TryRemove(o.Id, out _); noneWait.TryRemove(o.Id, out _);   // 고쳤으면 바로 다음 차례에 찾음
+        noneWait.TryRemove(o.Id, out _);   // 고쳤으면 바로 다음 차례에 찾음
         if (o.Status == OrderStatus.InHome) db.SetClaimed(o.Id, DateTime.UtcNow);   // 고친 뒤 다시 맡길 시간을 줌
         log($"#{o.Id} 맡길 포켓몬 수정 → {kp.Ko()}");
         return $"#{o.Id} 맡길 포켓몬을 **{kp.Ko()}**(으)로 고쳤어요." + (o.Status == OrderStatus.InHome ? $" 지금부터 {cfg.Limits.ClaimTimeoutSec / 60}분 동안 다시 찾아요." : "") + "\n" + GtsGuide(o.Describe, kp, BotPk(o));
@@ -911,11 +983,37 @@ public sealed class Orchestrator
     {
         while (!ct.IsCancellationRequested)
         {
-            try { if (!Paused) await tick(ct); LastTick = DateTime.Now; }
+            try { if (!Paused) await tick(ct); LastTick = DateTime.Now; await Watch("loop:" + name, true); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception ex) { LastError = $"[{name}] {ex.Message}"; log($"{name} 줄 오류: {ex}"); }
+            catch (Exception ex) { LastError = $"[{name}] {ex.Message}"; log($"{name} 줄 오류: {ex}"); await Watch("loop:" + name, false, $"{name} 줄에서 같은 오류가 계속 나고 있어요: {ex.Message}"); }
             try { await Task.Delay(TimeSpan.FromSeconds(1), ct); } catch { break; }
         }
+    }
+
+    // ---- 조용한 실패 알림: 일시정지는 안 되지만 처리가 멈춘 것과 같은 실패가 일정 시간 넘게 이어지면 운영자에게 한 번 알림 (성공하면 초기화)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime since, bool told)> failWatch = new();
+    private async Task Watch(string key, bool ok, string msg = "", int minutes = 5)
+    {
+        if (ok) { failWatch.TryRemove(key, out _); return; }
+        var w = failWatch.GetOrAdd(key, _ => (DateTime.UtcNow, false));
+        if (w.told || DateTime.UtcNow - w.since < TimeSpan.FromMinutes(minutes)) return;
+        failWatch[key] = (w.since, true);
+        try { await AdminAlert($"{msg} ({minutes}분 넘게 이어짐)"); } catch { }
+    }
+
+    // ---- 스위치 쪽 한 번짜리 실패(화면 한 번 잘못 읽음 등): 저장 전이면 HOME을 저장 없이 닫고 다음 차례에 다시. 10분 안에 3번이면 그때 일시정지
+    private readonly List<DateTime> softFails = new();
+    private async Task SoftFail(string what)
+    {
+        LastError = what;
+        lock (softFails) { softFails.RemoveAll(t => DateTime.UtcNow - t > TimeSpan.FromMinutes(10)); softFails.Add(DateTime.UtcNow); }
+        int n; lock (softFails) n = softFails.Count;
+        if (n >= 3) { Paused = true; log($"{what} → 10분 안에 {n}번 → 일시정지"); await AdminAlert(what + $" (10분 안에 {n}번이라 일시정지)"); lock (softFails) softFails.Clear(); }
+        else log($"{what} → 저장 없이 닫고 다음 차례에 다시 ({n}/3)");
+    }
+    private async Task DiscardHome(CancellationToken ct)
+    {
+        try { var d = await sw.RunMacroAsync("home_discard", new Dictionary<string, string>(), ct); if (!d.Ok) log("HOME 닫기 확인 실패: " + d.Message); } catch (Exception dex) when (dex is not OperationCanceledException) { log("HOME 닫기 오류: " + dex.Message); }
     }
 
     /// <summary>켜질 때 스위치가 타이틀·로딩·HOME 앱 등 어디에 있든 봇 게임의 필드까지 데려다 놓음 (게임 전환 직후 재시작 포함)</summary>
@@ -1121,34 +1219,48 @@ public sealed class Orchestrator
         var og = string.IsNullOrEmpty(o.Game) ? Game : Norm(o.Game);
         GenService gen;
         try { gen = GenOf(og); }
-        catch (Exception ex) { Fail(o, "생성 엔진 준비 실패"); log($"#{o.Id} {GameKo(og)} 생성 엔진 준비 실패: {ex.Message}"); await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 만들지 못했습니다: 봇의 {GameKo(og)} 준비에 문제가 있어요. 운영자에게 알려 주세요."); return; }
+        catch (Exception ex) { if (!Fail(o, "생성 엔진 준비 실패")) return; log($"#{o.Id} {GameKo(og)} 생성 엔진 준비 실패: {ex.Message}"); await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 만들지 못했습니다: 봇의 {GameKo(og)} 준비에 문제가 있어요. 운영자에게 알려 주세요."); return; }
         PKM pk; string msg;
         if (o.Kind == "file")
         {
             // 미리 신청한 파일: 받은 그대로 둔 것을 지금 게임 형식으로 바꿔 확인
             var raw = o.PoolId is { } rid ? db.GetPool(rid) : null;
-            (pk, msg) = raw == null ? (null, "올린 파일을 찾지 못했습니다") : gen.FromFile(raw.PkBytes, o.Text);
-            if (pk == null) { Fail(o, msg); await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 {GameKo(og)}에 넣을 수 없습니다: {msg}"); return; }
+            try { (pk, msg) = raw == null ? (null, "올린 파일을 찾지 못했습니다") : gen.FromFile(raw.PkBytes, o.Text); }
+            catch (Exception ex) when (!ct.IsCancellationRequested) { (pk, msg) = (null, "변환 오류: " + ex.Message); }
+            if (pk != null && BdspBlock(og, pk, o.Id) is { } bb1) { pk = null; msg = bb1; }
+            if (pk == null) { if (Fail(o, msg)) await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 {GameKo(og)}에 넣을 수 없습니다: {msg}"); return; }
             if (raw != null) db.Reserve(raw.Id, null);
             var fp = db.AddPool(GenService.Bytes(pk), pk.Extension, pk.Species, pk.Form, pk.IsShiny, $"file:{o.Id}");
-            db.Reserve(fp, o.Id); db.SetOrderPool(o.Id, fp); db.SetStatus(o.Id, OrderStatus.Generated, note: msg);
+            db.Reserve(fp, o.Id); db.SetOrderPool(o.Id, fp);
+            if (!db.SetStatusIf(o.Id, OrderStatus.Queued, OrderStatus.Generated, note: msg)) { db.Reserve(fp, null); db.SetLocation(fp, Location.Gone, -1, -1); log($"#{o.Id} 바꾸는 사이 취소됨"); return; }
             log($"#{o.Id} 미리 신청 파일 → {GameKo(og)} 형식: {o.Describe}");
             return;
         }
-        if (o.Kind == "showdown")
+        // 생성 엔진이 예외를 내도(해석 오류·시간 초과 등) 이 신청만 실패로 끝냄 — 안 잡으면 같은 신청을 1초마다 다시 집어 모든 생성이 멈춤
+        try
         {
-            var set = gen.ParseShowdown(o.Text, out var prob);
-            (pk, msg) = set == null ? (null, prob) : await gen.MakeFromSetAsync(set, ct, o.Text);
+            if (o.Kind == "showdown")
+            {
+                var set = gen.ParseShowdown(o.Text, out var prob);
+                (pk, msg) = set == null ? (null, prob) : await gen.MakeFromSetAsync(set, ct, o.Text);
+            }
+            else
+            {
+                var specs = gen.Parse(o.Text);
+                (pk, msg) = specs.Count == 0 ? (null, "해석 실패") : await gen.MakeAsync(specs[0], ct);
+            }
         }
-        else
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            var specs = gen.Parse(o.Text);
-            (pk, msg) = specs.Count == 0 ? (null, "해석 실패") : await gen.MakeAsync(specs[0], ct);
+            (pk, msg) = (null, ex is OperationCanceledException ? "생성 시간이 너무 오래 걸림" : "생성 오류: " + ex.Message);
+            log($"#{o.Id} 생성 중 예외: {ex.GetType().Name}: {ex.Message}");
         }
         if (db.GetOrder(o.Id).Status == OrderStatus.Cancelled) return;
-        if (pk == null) { Fail(o, msg); await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 만들지 못했습니다: {msg}"); return; }
+        if (pk != null && BdspBlock(og, pk, o.Id) is { } bb2) { pk = null; msg = bb2; }
+        if (pk == null) { if (Fail(o, msg)) await notify(o.DiscordId, $"#{o.Id} {o.Describe}를 만들지 못했습니다: {msg}"); return; }
         var pid = db.AddPool(GenService.Bytes(pk), pk.Extension, pk.Species, pk.Form, pk.IsShiny, o.Key);
-        db.Reserve(pid, o.Id); db.SetOrderPool(o.Id, pid); db.SetStatus(o.Id, OrderStatus.Generated, note: msg);
+        db.Reserve(pid, o.Id); db.SetOrderPool(o.Id, pid);
+        if (!db.SetStatusIf(o.Id, OrderStatus.Queued, OrderStatus.Generated, note: msg)) { db.Reserve(pid, null); db.SetLocation(pid, Location.Gone, -1, -1); log($"#{o.Id} 만드는 사이 취소됨"); return; }
         log($"#{o.Id} 생성" + (og != Game ? $"({GameKo(og)})" : "") + $": {o.Describe} ({msg})");
         PostCard(db.GetOrder(o.Id), pk);
     }
@@ -1184,8 +1296,6 @@ public sealed class Orchestrator
         for (int i = 1; i <= a.Length; i++) for (int j = 1; j <= b.Length; j++) d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
         return d[a.Length, b.Length];
     }
-    /// <summary>InjectNext가 같은 종 때문에 묶음을 더 못 채운 상태 (MoveToHome은 더 기다리지 않고 옮김)</summary>
-    private bool injectBlocked;
 
     /// <summary>게임 이동용 박스 1번 칸이 비면(이전 신청이 HOME으로 올라갔으면) 다음 개체를 넣음</summary>
     private async Task InjectNext(string g, CancellationToken ct)
@@ -1215,12 +1325,10 @@ public sealed class Orchestrator
             slots[slot] = gen.FromBytes(item.PkBytes, item.Format); placed.Add((o, item, slot));
         }
         if (placed.Count == 0) return;
-        injectBlocked = false;
         SwitchState = $"{GameKo(g)}에 {placed.Count}마리 넣는 중";
         var r = await sw.InjectBoxAsync(box, slots, ct);
-        if (!r.Ok && r.Message.Contains("busy", StringComparison.OrdinalIgnoreCase) && !busySince.ContainsKey(g)) busySince[g] = DateTime.UtcNow;
-        if (r.Ok) { busySince.Remove(g); busyAlerted.Remove(g); }
-        else if (busySince.TryGetValue(g, out var bs) && DateTime.UtcNow - bs > TimeSpan.FromMinutes(10) && busyAlerted.Add(g)) await AdminAlert($"{GameKo(g)} 세이브가 10분 넘게 잠겨 있어 넣지 못하고 있어요 (스위치 화면 확인 필요): " + r.Message);
+        // 같은 게임에 넣기가 계속 실패하면(세이브 깨짐·FTP 끊김·세이브 잠김 등) 일시정지는 안 되지만 처리가 멈춘 것과 같음 → 5분 넘으면 운영자에게 한 번 알림 (11-01 01:42: 23분 동안 아무 알림 없이 실패만 반복)
+        await Watch("inject:" + g, r.Ok, $"{GameKo(g)}에 포켓몬 넣기가 계속 실패하고 있어요 (스위치 세이브·FTP 확인 필요): {r.Message}");
         if (!r.Ok)
         {
             LastError = "주입 실패: " + r.Message; log(LastError);
@@ -1276,7 +1384,7 @@ public sealed class Orchestrator
             acct = cand[0].a;
         }
         // 더 올 신청이 남아 있고 묶음이 아직 안 찼으면 조금 기다림 (다 채워서 한 번에 가는 게 빠름). 기다려도 3초마다 다시 봄
-        bool moreComing = !injectBlocked && OrdG(g, OrderStatus.Queued, OrderStatus.Generated).Count > 0 && batch.Count < BatchMax;
+        bool moreComing = OrdG(g, OrderStatus.Queued, OrderStatus.Generated).Count > 0 && batch.Count < BatchMax;
         if (moreComing) { SwitchState = $"{GameKo(g)}에 {batch.Count}마리 · 다음 신청 생성 기다림"; return; }
         if (!await acctLock[acct].WaitAsync(0, ct)) return;
         bool launched = false;
@@ -1288,23 +1396,46 @@ public sealed class Orchestrator
             {
                 int tb = cfg.Switch.TransferBox - 1;
                 var nowBox = await sw.ReadBoxAsync(tb, ct);
-                var want = new PKM[30]; int lost = 0;
+                var want = new PKM[30]; int lost = 0, stray = 0; var batchSlots = new HashSet<int>();
                 for (int i = 0; i < 30; i++) want[i] = i < nowBox.Count ? nowBox[i] : null;
                 foreach (var o in batch)
                 {
                     var it = db.GetPool(o.PoolId.Value);
                     if (it == null || it.Box != tb || it.Slot is < 0 or >= 30) continue;
+                    batchSlots.Add(it.Slot);
                     var pk = gen.FromBytes(it.PkBytes, it.Format);
                     if (want[it.Slot] == null || !Same(want[it.Slot], pk)) { want[it.Slot] = pk; lost++; }
                 }
-                if (lost > 0)
+                // 이번에 옮길 개체가 아닌데 박스에 남은 것(취소된 신청 등)은 비움: 범위 이동 네모 안에 들어가 같이 HOME으로 올라가면
+                // HOME이 거부하는 개체(가짜 트래커 등)가 묶음 전체 저장을 막음 (10-31 17:07·17:29·17:33 #6910)
+                // 봇이 이 박스에 넣어 둔 기록이 있는 칸(이번 묶음에 안 든 개체 포함)은 건드리지 않음 → 취소 등으로 기록이 없어진 칸만 비움
                 {
-                    log($"게임 박스에서 {lost}마리가 사라져 있음 → 다시 넣고 옮김");
-                    var ri = await sw.InjectBoxAsync(tb, want, ct);
-                    if (!ri.Ok) { LastError = "다시 넣기 실패: " + ri.Message; log(LastError); return; }
+                    foreach (var p in db.Pool(Location.Switch))
+                        if (p.Box == tb && p.Slot is >= 0 and < 30 && p.ReservedBy is { } rb && db.GetOrder(rb) is { } ro && Active.Contains(ro.Status)) batchSlots.Add(p.Slot);
+                    for (int i = 0; i < 30; i++) if (!batchSlots.Contains(i) && want[i] is { Species: > 0 }) { want[i] = null; stray++; }
                 }
+                if (lost > 0 || stray > 0)
+                {
+                    log($"게임 박스 맞추기: 사라진 {lost}마리 다시 넣고 · 옮기지 않을 {stray}마리 비움 → 옮김");
+                    var ri = await sw.InjectBoxAsync(tb, want, ct);
+                    if (!ri.Ok)
+                    {
+                        LastError = "다시 넣기 실패: " + ri.Message; log(LastError);
+                        await Watch("premove:" + g, false, $"{GameKo(g)} HOME으로 옮기기 전 게임 박스 맞추기가 계속 실패하고 있어요: {ri.Message}");
+                        sw.Disconnect(); try { await Task.Delay(TimeSpan.FromSeconds(5), ct); } catch { }
+                        return;
+                    }
+                }
+                await Watch("premove:" + g, true);
             }
-            catch (Exception ex) { log("옮기기 전 게임 박스 확인 실패: " + ex.Message + " (그대로 진행)"); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // 박스를 못 읽었는데 그대로 옮기면 남은 개체(가짜 트래커 등) 정리가 빠져 HOME 저장이 거부될 수 있음 (#6910) → 다음 차례에 다시 읽음
+                LastError = "옮기기 전 게임 박스 확인 실패: " + ex.Message; log(LastError + " → 다음 차례에 다시");
+                await Watch("premove:" + g, false, $"{GameKo(g)} HOME으로 옮기기 전 게임 박스를 계속 읽지 못하고 있어요: {ex.Message}");
+                sw.Disconnect(); try { await Task.Delay(TimeSpan.FromSeconds(5), ct); } catch { }
+                return;
+            }
             SwitchState = $"{batch.Count}마리 스위치 HOME으로 옮기는 중" + (Accounts > 1 ? $" (계정 {acct})" : "");
             // 같은 계정이 휴대폰에서 켜져 있으면 안 됨 → 닫기 (기다리지 않음: 게임 저장하는 몇 초 사이에 끝남)
             if (phone != null)
@@ -1342,21 +1473,39 @@ public sealed class Orchestrator
                 if (!await EnsureSwitch(ct)) return;   // HOME이 켜져 있으면 저장 없이 닫고 게임 필드까지 복귀
                 r = await sw.MoveBoxToHomeAsync(cfg.Switch.TransferBox, 1, ct, items.Select(x => x.item.Slot).ToList());
             }
-            if (!r.Ok) { LastError = "HOME 이동 실패: " + r.Message; Paused = true; log(LastError + " → 일시정지"); await AdminAlert(LastError); return; }
+            if (!r.Ok)
+            {
+                // HOME 저장 전 실패(화면 한 번 잘못 읽음 등): 저장 없이 닫으면 HOME·게임 모두 옮기기 전 그대로(놓아준 것도 되돌아감) → 다음 차례에 다시
+                await DiscardHome(ct);
+                SwitchState = "HOME 이동 실패 · 다시 시도";
+                await SoftFail("HOME 이동 실패: " + r.Message);
+                return;
+            }
             List<HomeSlot> read;
             try { read = await sw.ReadHomeBoxesAsync(1, 1, ct); } catch (Exception ex) { log("HOME 박스 읽기 실패: " + ex.Message); read = []; }
             log($"HOME 박스 1 읽기: {read.Count}마리" + string.Concat(read.Select(h => $" [{h.Slot + 1}:{h.Pk.Species}]")));
             // HOME 저장 → HOME 버튼으로 스위치 메뉴 → (여기서 휴대폰 HOME을 미리 켬) → HOME 앱 닫기 (다음 세이브 쓰기 준비)
             var saved = await sw.RunMacroAsync("home_save", new Dictionary<string, string>(), ct);
-            if (!saved.Ok) { LastError = "HOME 저장 실패: " + saved.Message; Paused = true; await AdminAlert(LastError); return; }
-            if (phone != null)
+            if (!saved.Ok)
             {
-                // 저장이 끝났으니 휴대폰 HOME을 지금 켜 둠 (그동안 휴대폰도 로그인·준비) — 기다리지 않음
-                _ = Task.Run(async () => { try { var l = await phone.HomeLaunchAsync(ct, acct); if (l.Ok) prelaunchOf[acct] = DateTime.UtcNow; else log("휴대폰 HOME 미리 켜기: " + l.Message); } catch { } });
+                // 저장 중 HOME 서버 오류(에러 코드 2-ALZTA-0005 등 · '타이틀 화면으로 돌아갑니다'): 저장이 안 됐으니 HOME·게임 모두 옮기기 전 그대로
+                // (17:07 확인: 옮기던 10마리가 게임 박스에 그대로 있었음) → OK 누르고 HOME을 닫은 뒤 다음 차례에 같은 개체를 다시 옮김.
+                // 30분 안에 3번 넘게 나면 서버 쪽 문제가 이어지는 것이라 일시정지
+                bool homeErr = false;
+                try { homeErr = (await sw.RunMacroAsync("home_error_ok", new Dictionary<string, string>(), ct)).Ok; } catch (Exception ex) when (ex is not OperationCanceledException) { log("HOME 오류 창 확인 실패: " + ex.Message); }
+                saveErrAt.RemoveAll(t => DateTime.UtcNow - t > TimeSpan.FromMinutes(30));
+                if (homeErr && saveErrAt.Count < 3)
+                {
+                    saveErrAt.Add(DateTime.UtcNow);
+                    log($"HOME 저장 중 서버 오류 창 → OK · 저장되지 않았으니 HOME을 닫고 다음 차례에 다시 옮김 ({saveErrAt.Count}/3, 30분 기준)");
+                    SwitchState = "HOME 서버 오류 · 다시 시도";
+                    await DiscardHome(ct);   // HOME을 닫은 상태로 다음 차례 (위 '옮길 자리가 없음'과 같게)
+                    return;
+                }
+                LastError = "HOME 저장 실패: " + saved.Message + (homeErr ? " (HOME 서버 오류가 30분 안에 여러 번)" : ""); Paused = true; await AdminAlert(LastError); return;
             }
-            var back = await sw.RunMacroAsync("home_close", new Dictionary<string, string>(), ct);
-            if (!back.Ok) { LastError = $"{GameKo(g)} 복귀(HOME 닫기) 실패: " + back.Message; Paused = true; await AdminAlert(LastError); return; }
-            launched = true;
+            // HOME 저장이 끝난 순간 개체는 HOME에 있음 → 기록을 바로 고침. 게임 실행(아래)이 실패해 멈췄다 재개해도 '게임 박스에 없음'으로 보고
+            // 같은 개체를 다시 넣어 HOME에 두 번 올리는 일이 없게 (전에는 게임 실행이 끝난 뒤에야 기록을 고쳤음)
             var keepIds = keepItems.Select(p => p.Id).ToHashSet();
             // 놓아준 개체는 기록에서 지움. 단, 남은 칸을 확인 못 해 찬 칸을 하나도 놓아주지 않았으면(KeepUnverified) 그대로 HOME에 있음 → 지우지 않음
             //  (지우면 같은 이름 개체가 HOME에 둘인데 하나로 알고 '어느 것인지 알 수 없음'이 됨: #763 사례) — 다음 이동 때 확인되면 놓아줌
@@ -1373,17 +1522,31 @@ public sealed class Orchestrator
                 var hit = read.FirstOrDefault(h => Same(h.Pk, pk)) ?? sw.LastAltRead.FirstOrDefault(h => Same(h.Pk, pk));
                 int slot = hit?.Slot ?? (k < placedSlots.Count ? placedSlots[k] : k);
                 db.SetLocation(item.Id, Location.Home, 1, slot, verified: hit != null);
+                if (BdspSpecialKey(g, pk) is { } bk) { BdspMarkSent(bk); log($"#{o.Id} 브다샤펄 전설·환상 기록: {gen.Strings.Species[pk.Species]}{(pk.IsShiny ? " 이로치" : "")} (이 세이브에서 다시 보낼 수 없음)"); }
                 db.Set($"pacct:{item.Id}", acct.ToString()); db.Set($"acct:{o.Id}", acct.ToString());
                 if (!db.SetStatusIf(o.Id, OrderStatus.OnSwitch, OrderStatus.InHome)) { log($"#{o.Id} 옮기는 사이 취소됨 → HOME에 둠 (다음 이동 때 놓아줌)"); continue; }
                 db.SetClaimed(o.Id, DateTime.UtcNow);
                 log($"#{o.Id} HOME 1-{slot + 1}에 올라감");
                 // '교환 차례' DM은 휴대폰이 실제로 이 신청을 처음 검색할 때 보냄 (SearchOnce) — 묶음 뒤쪽 사람이 DM 받고 한참 기다리지 않게
             }
-            injectBlocked = false;
             db.Set("batch_size", items.Count.ToString()); db.Set($"batch_size:{acct}", items.Count.ToString()); db.Set("last_acct", acct.ToString());
             freshOf[acct] = true;
             log($"{items.Count}마리 HOME 이동 완료" + (Accounts > 1 ? $" (계정 {acct} · 휴대폰 #N{acct})" : "") + " → 휴대폰 차례");
             _ = Task.Run(() => NotifyNextAsync(g));
+            if (phone != null)
+            {
+                // 저장이 끝났으니 휴대폰 HOME을 지금 켜 둠 (그동안 휴대폰도 로그인·준비) — 기다리지 않음
+                _ = Task.Run(async () => { try { var l = await phone.HomeLaunchAsync(ct, acct); if (l.Ok) prelaunchOf[acct] = DateTime.UtcNow; else log("휴대폰 HOME 미리 켜기: " + l.Message); } catch { } });
+            }
+            var back = await sw.RunMacroAsync("home_close", new Dictionary<string, string>(), ct);
+            if (!back.Ok)
+            {
+                // 이미 저장·기록이 끝났으니 다시 옮길 것은 없음 → 연결을 버리고 다음 차례에 다시 (HOME이 남아 있으면 세이브 잠김으로 보고 저장 없이 닫음)
+                sw.Disconnect();
+                await SoftFail($"{GameKo(g)} 복귀(HOME 닫기) 실패: " + back.Message);
+                return;
+            }
+            launched = true;
         }
         finally { sw.HomeUserOverride = null; sw.KeepHomeCells = new(); sw.KeepPks = new(); acctLock[acct].Release(); }
         if (launched)
@@ -1393,12 +1556,17 @@ public sealed class Orchestrator
         }
     }
 
-    private DateTime lastBusyClose = DateTime.MinValue; private readonly Dictionary<string, DateTime> busySince = new(); private readonly HashSet<string> busyAlerted = new();
+    private DateTime lastBusyClose = DateTime.MinValue;
     private async Task<bool> EnsureSwitch(CancellationToken ct)
     {
         if (sw.Connected) return true;
-        try { await sw.ConnectAsync(ct); return true; }
-        catch (Exception ex) { LastError = "스위치 연결 실패: " + ex.Message; SwitchState = "스위치 연결 안 됨"; return false; }
+        try { await sw.ConnectAsync(ct); await Watch("switch-connect", true); return true; }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LastError = "스위치 연결 실패: " + ex.Message; SwitchState = "스위치 연결 안 됨";
+            await Watch("switch-connect", false, "스위치에 연결하지 못하고 있어요 (와이파이·sys-botbase 확인 필요): " + ex.Message);
+            return false;
+        }
     }
 
     // ---------- 휴대폰 줄: HOME에 올라간 신청들을 돌아가며 한 번씩 검색 (먼저 맡긴 사람부터 교환됨)
@@ -1407,9 +1575,6 @@ public sealed class Orchestrator
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, int> noneSinceDm = new();
     private readonly HashSet<long> toldRetry = new();
     private bool IsToldRetry(long id) { lock (toldRetry) return toldRetry.Contains(id); }
-    /// <summary>아직 안 맡긴(검색 결과 없음) 신청은 몇 바퀴 건너뜀 → 맡긴 사람이 먼저 교환됨. 시간 제한은 그대로</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, int> skipRounds = new();
-    private int SkipOf(long id) => skipRounds.TryGetValue(id, out var v) ? v : 0;
     // 아직 안 맡긴(검색 결과 없음) 신청은 다음 검색까지 점점 길게 쉼: 20초 → 40 → 80 → 120 → 180초. 그동안 맡긴 사람을 먼저 교환
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, (int n, DateTime next)> noneWait = new();
     private static readonly int[] NoneBackoff = [20, 40, 80, 120, 180];
@@ -1450,14 +1615,11 @@ public sealed class Orchestrator
             due = [soon];
         }
         list = due;
-        bool anyLive = false;
         foreach (var o in list)
         {
             ct.ThrowIfCancellationRequested();
             var cur = db.GetOrder(o.Id);
             if (cur == null || cur.Status != OrderStatus.InHome) continue;
-            // 건너뛸 차례면 넘김 (단, 시간이 다 됐으면 끝내야 하니 검사는 함 / 전부 건너뛸 차례면 그냥 검색)
-            if (anyLive && SkipOf(o.Id) > 0 && !Expired(cur)) { skipRounds[o.Id]--; continue; }
             if (Paused) break;   // 앞 신청에서 고장으로 멈췄으면 나머지도 바로 멈춤 (같은 오류로 시간만 씀)
             int a = AcctOf(o.Id);
             if (!await acctLock[a].WaitAsync(0, ct)) continue;
@@ -1488,12 +1650,8 @@ public sealed class Orchestrator
         log($"#{o.Id} 교환 차례 알림");
     }
 
-    private bool Expired(Order o)
-    {
-        int a0 = AcctOf(o.Id);
-        int together = Math.Max(Math.Max(1, HomeOf(a0).Count), int.TryParse(db.Get($"batch_size:{a0}", db.Get("batch_size")), out var bs) ? bs : 1);
-        return DateTime.UtcNow >= (o.ClaimedAt ?? DateTime.UtcNow).AddSeconds(Math.Max(120, cfg.Limits.ClaimTimeoutSec) + Math.Min(90 * (together - 1), 1800));
-    }
+    private DateTime Deadline(Order o) => (o.ClaimedAt ?? DateTime.UtcNow).AddSeconds(DeadlineSec(o));
+    private bool Expired(Order o) => DateTime.UtcNow >= Deadline(o);
 
     private async Task SearchOnce(Order o, CancellationToken ct)
     {
@@ -1510,13 +1668,12 @@ public sealed class Orchestrator
         var st = ph.GetValueOrDefault(o.Id);
         // 묶음이면 돌아가며 찾으므로 그만큼 시간을 더 줌. 묶음 크기는 HOME에 올릴 때 정해 둔 값 (교환이 끝날수록 줄어드는 지금 수를 쓰면 남은 사람 시간이 깎임)
         int acct = AcctOf(o.Id);
-        int together = Math.Max(Math.Max(1, HomeOf(acct).Count), int.TryParse(db.Get($"batch_size:{acct}", db.Get("batch_size")), out var bs) ? bs : 1);
-        var deadline = (o.ClaimedAt ?? DateTime.UtcNow).AddSeconds(Math.Max(120, cfg.Limits.ClaimTimeoutSec) + Math.Min(90 * (together - 1), 1800));
+        var deadline = Deadline(o);
         if (DateTime.UtcNow >= deadline)
         {
+            if (!db.SetStatusIf(o.Id, OrderStatus.InHome, OrderStatus.Failed, error: "시간 안에 GTS에서 찾지 못함")) { ph.TryRemove(o.Id, out _); return; }   // 그 사이 취소됨
             db.EndTrade(db.AddTrade(o.Id, item?.Id, o.Route), "시간 초과", st.shot ?? "");
             if (item != null) db.Reserve(item.Id, null);
-            db.SetStatus(o.Id, OrderStatus.Failed, error: "시간 안에 GTS에서 찾지 못함");
             log($"#{o.Id} 시간 초과 (GTS에서 못 찾음)");
             await notify(o.DiscordId, $"⌛ #{o.Id} 시간 안에 GTS에서 맡긴 포켓몬(**{k.Ko()}**)을 찾지 못해 신청을 끝냈습니다. 맡긴 포켓몬은 GTS에서 회수하고 다시 신청해 주세요.");
             ph.TryRemove(o.Id, out _); return;
@@ -1575,9 +1732,9 @@ public sealed class Orchestrator
             st.errors++; log($"#{o.Id} GTS 검색 오류: {r.Message}"); LastError = "GTS: " + r.Message; freshOf[acct] = true;
             if (st.errors >= 3)
             {
+                if (!db.SetStatusIf(o.Id, OrderStatus.InHome, OrderStatus.Failed, error: "휴대폰 HOME 조작 오류")) { ph.TryRemove(o.Id, out _); return; }   // 그 사이 취소됨
                 db.EndTrade(db.AddTrade(o.Id, item?.Id, o.Route), "휴대폰 오류", st.shot ?? "");
                 if (item != null) db.Reserve(item.Id, null);
-                db.SetStatus(o.Id, OrderStatus.Failed, error: "휴대폰 HOME 조작 오류");
                 log($"[넘김] #{o.Id} 봇 쪽 오류 3번 → 넘김: {r.Message}");
                 await notify(o.DiscordId, $"❌ #{o.Id} {o.Describe} · 봇 쪽 문제로 교환하지 못해 신청을 넘겼습니다. 운영자가 문제를 파악해 고치고 있으니, GTS에 맡긴 포켓몬은 회수하시고 나중에 다시 신청해 주세요. 불편을 드려 죄송합니다.");
                 await AdminAlert($"#{o.Id} 휴대폰 HOME 오류: {LastError}");
@@ -1641,7 +1798,59 @@ public sealed class Orchestrator
         ph[o.Id] = st;
     }
 
-    private void Fail(Order o, string why) { db.SetStatus(o.Id, OrderStatus.Failed, error: why); log($"#{o.Id} 실패: {why}"); }
+    // ---- 브다샤펄 전설·환상 제한: HOME은 브다샤펄 세이브 하나당, 트래커가 없는(브다샤펄에서 태어난) 전설·준전설·환상을
+    //      종마다 일반색·이로치 각각 1마리만 받음. 세이브를 되돌려도 HOME 서버가 기억하므로 봇이 보낸 것을 기록해 두고 같은 조합은 받지 않음.
+    public static string BdspSpecialKey(string game, PKM pk)
+    {
+        if (pk is not PB8 pb || Norm(game) != "BD") return null;
+        if (pb.Tracker != 0) return null;                                          // 다른 게임에서 HOME을 거쳐 온 개체는 제한 없음
+        if (!(SpeciesCategory.IsLegendary(pk.Species) || SpeciesCategory.IsSubLegendary(pk.Species) || SpeciesCategory.IsMythical(pk.Species))) return null;
+        return $"{pk.Species}:{(pk.IsShiny ? 1 : 0)}";
+    }
+    private HashSet<string> BdspSent() => db.Get("bdsp_special_sent").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+    private void BdspMarkSent(string key) { var s = BdspSent(); if (s.Add(key)) db.Set("bdsp_special_sent", string.Join(",", s)); }
+    /// <summary>이 개체를 받으면 안 되는 이유 (없으면 null): 이미 HOME으로 보냈거나, 같은 조합이 대기열에 이미 있음</summary>
+    private string BdspBlock(string game, PKM pk, long selfId)
+    {
+        if (BdspSpecialKey(game, pk) is not { } key) return null;
+        var name = gen.Strings.Species[pk.Species] + (pk.IsShiny ? " 이로치" : "");
+        string Why(string w) => $"브릴리언트 다이아몬드·샤이닝 펄의 {name}은(는) {w}. HOME은 브다샤펄 세이브 하나에서 전설·환상을 종마다 일반색·이로치 각각 한 번만 받아요. 다른 게임으로 신청해 주세요";
+        if (BdspSent().Contains(key)) return Why("이 봇 세이브에서 이미 HOME으로 보냈어요");
+        foreach (var other in db.Orders(Active))
+        {
+            if (other.Id == selfId || other.PoolId == null || (NormOrNull(other.Game) ?? Game) != "BD") continue;
+            var it = db.GetPool(other.PoolId.Value);
+            if (it == null || it.Species != pk.Species || it.Shiny != pk.IsShiny) continue;
+            try { if (BdspSpecialKey("BD", GenOf("BD").FromBytes(it.PkBytes, it.Format)) == key) return Why($"이미 다른 신청(#{other.Id})으로 보내는 중이에요"); } catch { }
+        }
+        return null;
+    }
+
+    /// <summary>운영자: 브다샤펄로 이미 보낸 전설·환상 기록 보기·추가·빼기 (봇 밖에서 보낸 것도 적어 둘 수 있음). 인자: "" 보기 · "종이름[:이로치]" 추가 · "-종이름[:이로치]" 빼기 · "clear"</summary>
+    public string AdminBdspSent(string arg)
+    {
+        arg = (arg ?? "").Trim();
+        string Show() { var s = BdspSent(); return s.Count == 0 ? "브다샤펄 전설·환상 기록 없음" : "브다샤펄로 보낸 전설·환상: " + string.Join(", ", s.Select(k => { var p = k.Split(':'); return gen.Strings.Species[int.Parse(p[0])] + (p[1] == "1" ? " 이로치" : ""); })); }
+        if (arg == "") return Show();
+        if (arg == "clear") { db.Set("bdsp_special_sent", ""); log("운영자: 브다샤펄 전설·환상 기록 비움"); return "기록을 비웠습니다"; }
+        bool remove = arg.StartsWith('-'); if (remove) arg = arg[1..];
+        var parts = arg.Split(':'); var name = parts[0].Trim(); bool shiny = parts.Length > 1 && parts[1].Trim() is "이로치" or "1" or "shiny";
+        int sp = Array.FindIndex(gen.Strings.Species.ToArray(), x => x == name);
+        if (sp <= 0) sp = Array.FindIndex(GameInfo.GetStrings("en").Species.ToArray(), x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+        if (sp <= 0) return $"'{name}' 포켓몬을 찾지 못했습니다";
+        if (!(SpeciesCategory.IsLegendary((ushort)sp) || SpeciesCategory.IsSubLegendary((ushort)sp) || SpeciesCategory.IsMythical((ushort)sp))) return $"{gen.Strings.Species[sp]}은(는) 전설·환상이 아니라 제한 대상이 아닙니다";
+        var key = $"{sp}:{(shiny ? 1 : 0)}"; var set = BdspSent();
+        if (remove) set.Remove(key); else set.Add(key);
+        db.Set("bdsp_special_sent", string.Join(",", set)); log($"운영자: 브다샤펄 기록 {(remove ? "빼기" : "추가")} {gen.Strings.Species[sp]}{(shiny ? " 이로치" : "")}");
+        return Show();
+    }
+
+    /// <summary>실패로 끝냄. 그 사이 상태가 바뀌었으면(취소 등) 건드리지 않고 false</summary>
+    private bool Fail(Order o, string why)
+    {
+        if (!db.SetStatusIf(o.Id, o.Status, OrderStatus.Failed, error: why)) { log($"#{o.Id} 실패 처리 건너뜀 (그 사이 상태가 바뀜): {why}"); return false; }
+        log($"#{o.Id} 실패: {why}"); return true;
+    }
     /// <summary>밖에서 멈춰야 할 일이 생겼을 때 (이미 멈춰 있으면 알리지 않음)</summary>
     public void PauseFor(string why)
     {
@@ -1651,20 +1860,6 @@ public sealed class Orchestrator
     }
     private async Task AdminAlert(string msg) { foreach (var a in cfg.Discord.AdminIds) await notify(a, "🛠 [HomeBot] " + msg); }
     private static bool Same(PKM a, PKM b) => a.Species == b.Species && a.PID == b.PID && a.EncryptionConstant == b.EncryptionConstant;
-
-    /// <summary>운영자: 범위 신청을 풀에 미리 만들어 둠.</summary>
-    public async Task<(int made, List<string> failed)> FillPoolAsync(string text, int max, CancellationToken ct)
-    {
-        var specs = gen.Parse(text); int made = 0; var failed = new List<string>();
-        foreach (var o in specs.Take(max))
-        {
-            ct.ThrowIfCancellationRequested();
-            var (pk, msg) = await gen.MakeAsync(o, ct);
-            if (pk == null) { failed.Add(gen.Describe(o) + ": " + msg); continue; }
-            db.AddPool(GenService.Bytes(pk), pk.Extension, pk.Species, pk.Form, pk.IsShiny, OrderKey.Of(o)); made++;
-        }
-        return (made, failed);
-    }
 
     // =============== 관리 창: 대기열 편집 ===============
     /// <summary>순서를 바꿀 수 있는 신청 (아직 스위치에 넣기 전)</summary>

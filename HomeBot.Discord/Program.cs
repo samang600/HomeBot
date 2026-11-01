@@ -579,9 +579,11 @@ _ = Task.Run(async () =>
         {
             if (File.Exists(cmdf))
             {
-                var lines = File.ReadAllLines(cmdf); File.Delete(cmdf);
+                // 먼저 옮겨 두고 읽음: 읽고 지우는 사이에 관리 창이 덧붙인 명령이 사라지지 않게
+                var runf = cmdf + ".run"; File.Delete(runf); File.Move(cmdf, runf);
+                var lines = File.ReadAllLines(runf); File.Delete(runf);
                 foreach (var raw in lines)
-                {
+                { try {
                     var c = raw.Trim(); if (c.Length == 0) continue;
                     var p = c.Split(':'); string res;
                     if (c == "pause") { orch.Paused = true; res = "일시정지"; }
@@ -600,6 +602,7 @@ _ = Task.Run(async () =>
                     else if (c == "worker_restart") res = phone != null ? ((await phone.ExitAsync(CancellationToken.None)).Ok ? "워커 다시 켜기 (작업이 끝난 뒤)" : "워커 다시 켜기 실패") : "워커 없음";
                     else if (p[0] == "dm" && p.Length >= 3 && long.TryParse(p[1], out var dmid)) res = await orch.AdminDmAsync(dmid, c.Split(':', 3)[2]);
                     else if (p[0] == "cancelmsg" && p.Length >= 3 && long.TryParse(p[1], out var cmid)) res = await orch.AdminCancelAsync(cmid, c.Split(':', 3)[2]);
+                    else if (c.StartsWith("bdsp_sent")) res = orch.AdminBdspSent(c.Length > 10 ? c[10..] : "");   // bdsp_sent · bdsp_sent:디아루가:이로치 · bdsp_sent:-디아루가 · bdsp_sent:clear
                     else if (c == "clear") res = await orch.ClearQueueAsync(false);
                     else if (c == "clear_all") res = await orch.ClearQueueAsync(true);
                     else if (c.StartsWith("announce:"))
@@ -635,7 +638,7 @@ _ = Task.Run(async () =>
                     else if (c == "ftp:probe") { try { var t = await Task.Run(() => sw.FtpProbe()); File.WriteAllText(Path.Combine(cfg.DataDir, "ftp_probe.txt"), t); res = "FTP 목록을 data/ftp_probe.txt에 저장"; } catch (Exception ex) { res = "FTP 확인 실패: " + ex.Message; } }
                     else res = "모르는 명령: " + c;
                     Log("관리 창: " + res);
-                }
+                } catch (Exception cex) { Log($"관리 창 명령 실패: {raw.Trim()} · {cex.Message}"); } }   // 한 명령이 실패해도 뒤 명령(일시정지 등)은 실행
             }
             await FillNamesAsync();
             File.WriteAllText(Path.Combine(cfg.DataDir, "queue.tsv"), orch.QueueTsv());
@@ -769,13 +772,17 @@ string LastVoteLine()
     int need = preview ? Math.Max(1, cfg.Vote.Needed) : orch.VoteNeeded;
     bool cool = DateTime.UtcNow < orch.VoteOpenAt;
     var byG = orch.VotesByGame();
-    string body = $"지금 교환 중: **{cur}**\n\n바꾸고 싶은 게임 버튼을 누르세요. 한 게임이 **{need}명**을 모으면 {cur} 신청을 마감하고, 이미 받은 신청을 모두 끝낸 뒤 그 게임으로 바꿔요.\n게임마다 한 표씩 넣을 수 있고, 같은 버튼을 다시 누르면 그 표만 취소돼요." + (cfg.Vote.CooldownHours > 0 && need > 1 ? $" 게임을 바꾼 뒤 **{cfg.Vote.CooldownHours:0.#}시간** 동안은 다시 바꿀 수 없어요." : "") + "\n\n";
+    // 게임마다 필요한 표: 바로 전 게임·그 전 게임은 설정(Vote.ExtraForPrevious/ExtraForRecent)만큼 더 (미리보기는 본 서버 정원 기준으로 같은 만큼 더함)
+    int NeedOf(string g) => need + (orch.VoteNeededFor(g) - orch.VoteNeeded);
+    int exP = Math.Max(0, cfg.Vote.ExtraForPrevious), exR = Math.Max(0, cfg.Vote.ExtraForRecent);
+    string extraTxt = exP > 0 || exR > 0 ? $"(" + string.Join(", ", new[] { exP > 0 ? $"바로 전에 했던 게임은 {need + exP}명" : null, exR > 0 ? $"그 전에 했던 게임은 {need + exR}명" : null }.Where(x => x != null)) + ")" : "";
+    string body = $"지금 교환 중: **{cur}**\n\n바꾸고 싶은 게임 버튼을 누르세요. 한 게임이 **{need}명**{extraTxt}을 모으면 {cur} 신청을 마감하고, 이미 받은 신청을 모두 끝낸 뒤 그 게임으로 바꿔요.\n게임마다 한 표씩 넣을 수 있고, 같은 버튼을 다시 누르면 그 표만 취소돼요." + (cfg.Vote.CooldownHours > 0 && need > 1 ? $" 게임을 바꾼 뒤 **{cfg.Vote.CooldownHours:0.#}시간** 동안은 다시 바꿀 수 없어요." : "") + "\n\n";
     if (byG.Count == 0) body += "이 봇은 지금 한 게임만 다뤄요.";
     else if (!orch.VoteMode) body += "⏸ 지금은 투표를 쉬고 있어요.";
     else if (orch.SwitchRequested) body += $"✅ 투표 완료! **{other}**로 바꾸는 중이에요 (남은 신청 {orch.LeftBeforeSwitch}건 처리 후).";
     else if (cool) body += $"⏳ **{Orchestrator.Kst(orch.VoteOpenAt)}**부터 투표할 수 있어요.";
     else if (preview) body += "🛠 지금은 봇 점검(테스트) 중이라 투표를 잠시 쉬어요. 점검이 끝나면 여기서 바로 투표할 수 있어요.";
-    else body += string.Join("\n", byG.Select(kv => $"**{Orchestrator.GameKo(kv.Key)}** " + string.Concat(Enumerable.Range(0, need).Select(i => i < kv.Value.Count ? "🟦" : "⬜")) + $" {kv.Value.Count}/{need}" + Who(kv.Value)));
+    else body += string.Join("\n", byG.Select(kv => { int nd = NeedOf(kv.Key); return $"**{Orchestrator.GameKo(kv.Key)}** " + string.Concat(Enumerable.Range(0, nd).Select(i => i < kv.Value.Count ? "🟦" : "⬜")) + $" {kv.Value.Count}/{nd}" + (nd > need ? " · 최근에 한 게임" : "") + Who(kv.Value); }));
     if (orch.SwitchRequested && byG.TryGetValue(orch.OtherGame, out var won)) body += $"\n투표한 사람:{Who(won)}";
     if (orch.SideGames.Count > 0) body += $"\n\n🔀 지금 같이 받는 게임: " + string.Join(" · ", orch.SideGames.Select(x => $"**{Orchestrator.GameKo(x)}**" + (orch.SideClosing(x) ? " (마감 중)" : ""))) + " — 신청이 많아지면 마감될 수 있어요.";
     body += LastVoteLine();
@@ -783,7 +790,7 @@ string LastVoteLine()
         .WithDescription(body).WithFooter($"{cur} 교환 시작 {Orchestrator.Kst(orch.GameSince)} · HomeBot");
     bool can = orch.VoteMode && !orch.SwitchRequested && !cool && !preview;
     var cb = new ComponentBuilder();
-    foreach (var (g, l) in byG) cb.WithButton($"{Orchestrator.GameKo(g)} ({l.Count}/{need})", "vote_switch:" + g, ButtonStyle.Primary, disabled: !can);
+    foreach (var (g, l) in byG) cb.WithButton($"{Orchestrator.GameKo(g)} ({l.Count}/{NeedOf(g)})", "vote_switch:" + g, ButtonStyle.Primary, disabled: !can);
     return (eb.Build(), cb.Build());
 }
 async Task<ITextChannel> VoteChannel(bool tv)
@@ -855,7 +862,7 @@ async Task AfterVote(bool triggered)
     await RefreshVotePanel();
     if (!triggered) return;
     var other = Orchestrator.GameKo(orch.OtherGame); var cur = Orchestrator.GameKo(orch.Game); var left = orch.LeftBeforeSwitch;
-    var txt = $"🔁 전환 투표 {orch.VoteNeeded}명 달성! **{cur}** 신청은 여기서 마감하고, " + (left > 0 ? $"남은 {left}건을 끝낸 뒤 " : "") + $"**{other}** 교환으로 바꿉니다. 바뀌면 채널 이름의 🟢로 알려 드려요.";
+    var txt = $"🔁 전환 투표 {orch.VoteNeededFor(orch.OtherGame)}명 달성! **{cur}** 신청은 여기서 마감하고, " + (left > 0 ? $"남은 {left}건을 끝낸 뒤 " : "") + $"**{other}** 교환으로 바꿉니다. 바뀌면 채널 이름의 🟢로 알려 드려요.";
     foreach (var chId in VoteOnTest() ? Orchestrator.SaveGames.Select(TestChanOf).Where(x => x != 0).ToArray() : OrderChannels())
         if (await client.GetChannelAsync(chId) is IMessageChannel ach) { try { await ach.SendMessageAsync(txt); } catch (Exception ex) { Log("전환 공지 실패: " + ex.Message); } }
     await AdminAlertDm($"전환 투표 달성: {cur} → {other} (남은 {left}건)");

@@ -289,6 +289,7 @@ public sealed class GenService
             return (null, "합법 검사를 통과하지 못한 파일입니다: " + rep);
         }
         if (Untradable(pk) is { } why) return (null, why);
+        if (FakeTracker(pk)) return (null, "HOME 트래커가 올바르지 않은 개체입니다 (임의로 적은 값으로 보여 HOME이 받지 않아요). 받을 수 없어요");
         return (pk, "파일");
     }
 
@@ -296,6 +297,17 @@ public sealed class GenService
     /// 불법 사유가 리본(증표 포함)뿐인지. 실제 HOME은 리본을 검사하지 않아 교환·이동에 문제가 없으므로 파일 신청에서는 허용 (PKHeX 모바일과 같은 정책).
     /// 기술·떠올리기 기술이 불법이면 허용하지 않음.
     /// </summary>
+    /// <summary>
+    /// 임의로 적은 HOME 트래커: 진짜 트래커는 HOME이 정한 무작위 64비트라 16진수 16자리에 A~F가 거의 항상 섞임 (전부 0~9일 확률 약 0.05%).
+    /// 숫자로만 된 값(예: 6546516984451616)은 사람이 친 값 → HOME 저장 때 에러 10015로 묶음 전체가 막힘 (10-31 #6910 버드렉스)
+    /// </summary>
+    public static bool FakeTracker(PKM pk)
+    {
+        if (pk is not IHomeTrack { HasTracker: true } h) return false;
+        var hex = h.Tracker.ToString("X16");
+        return hex.All(char.IsDigit);
+    }
+
     public static bool OnlyRibbonInvalid(PKM pk)
     {
         try
@@ -326,7 +338,10 @@ public sealed class GenService
         var g = (gender ?? "").Trim().ToLowerInvariant();
         kp.Gender = g is "수컷" or "수" or "♂" or "m" or "male" or "남" ? 0 : g is "암컷" or "암" or "♀" or "f" or "female" or "여" ? 1 : -1;
         // 성별이 정해진 종은 HOME 검색 창에서 성별 칸이 잠김 → 검색 때 고르지 않음. 표시용 성별은 실제 값으로 맞춤
-        try
+        // 성별에 따라 폼이 갈리는 종(냐오닉스·에써르·대쓰여너·퍼퓨돈)은 0번 폼만 보면 '수컷만'으로 보여 암컷을 적어도 수컷으로 바뀌었음 → 적은 성별 그대로
+        if (kp.Species is (ushort)PKHeX.Core.Species.Meowstic or (ushort)PKHeX.Core.Species.Indeedee or (ushort)PKHeX.Core.Species.Basculegion or (ushort)PKHeX.Core.Species.Oinkologne)
+        { }
+        else try
         {
             var pi = PersonalTable.SV.GetFormEntry(kp.Species, 0) as IGenderDetail ?? (IGenderDetail)PersonalTable.SWSH.GetFormEntry(kp.Species, 0);
             if (pi.Genderless) { kp.GenderFixed = true; kp.Gender = -1; }
