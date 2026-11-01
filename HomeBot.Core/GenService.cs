@@ -245,6 +245,14 @@ public sealed class GenService
                 var r = tr.GetLegalFromSet(set);
                 var p = r.Created;
                 if (p == null) return (null, "만들지 못했습니다");
+                if (!GenHost.IsLegal(p))
+                {
+                    // 세트에 다른 어버이(OT:)를 적으면 '받은 트레이너'가 비어 있거나 맞지 않아 불법(TransferHandlerMismatchName 등)으로 나옴.
+                    // 봇 박스에 들어가면 봇 트레이너가 맡으므로 파일 신청과 같이 봇 세이브에 맞춰 다시 확인 (11-01 #8978 왕구리 OT 호룻호)
+                    var adapted = p.Clone();
+                    try { Sav.AdaptToSaveFile(adapted); adapted.RefreshChecksum(); } catch { adapted = null; }
+                    if (adapted != null && GenHost.IsLegal(adapted)) p = adapted;
+                }
                 if (!GenHost.IsLegal(p)) return (null, "이 세트는 합법으로 만들 수 없습니다: " + Report(p));
                 if (Untradable(p) is { } why) return (null, why + " (코라이돈·미라이돈은 문장 신청으로 해 주세요)");
                 return (p, r.Status.ToString());
