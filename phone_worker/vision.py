@@ -83,7 +83,7 @@ def match(img: np.ndarray, name: str, threshold: float | None = None):
             g = cv2.resize(cv2.cvtColor(img[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY), None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
             langs = "+".join(l for l in ("kor", "jpn", "eng") if os.path.isfile(os.path.join(TESSDATA, l + ".traineddata"))) or "eng"
             for im2 in (g, 255 - g):
-                got = re.sub(r"[\W_]+", "", tesserocr.image_to_text(Image.fromarray(im2), lang=langs, path=TESSDATA, psm=tesserocr.PSM.SINGLE_LINE).lower())
+                got = re.sub(r"[\W_]+", "", _tess_text(im2, langs, "SINGLE_LINE").lower())
                 if want in got: best = 1.0; break
                 L = len(want)
                 for i in range(0, max(1, len(got) - L + 1)):
@@ -124,7 +124,7 @@ def match_all(img: np.ndarray, name: str, threshold: float | None = None, gap: i
             g = cv2.resize(cv2.cvtColor(img[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY), None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
             langs = "+".join(l for l in ("kor", "jpn", "eng") if os.path.isfile(os.path.join(TESSDATA, l + ".traineddata"))) or "eng"
             for im2 in (g, 255 - g):
-                got = re.sub(r"[\W_]+", "", tesserocr.image_to_text(Image.fromarray(im2), lang=langs, path=TESSDATA, psm=tesserocr.PSM.SINGLE_LINE).lower())
+                got = re.sub(r"[\W_]+", "", _tess_text(im2, langs, "SINGLE_LINE").lower())
                 if want in got: best = 1.0; break
                 L = len(want)
                 for i in range(0, max(1, len(got) - L + 1)):
@@ -208,7 +208,7 @@ def ocr(img: np.ndarray, region=None) -> str:
         from PIL import Image
         g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         g = cv2.resize(g, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        return " ".join(tesserocr.image_to_text(Image.fromarray(g), lang="eng", path=TESSDATA, psm=tesserocr.PSM.SPARSE_TEXT).split())
+        return " ".join(_tess_text(g, "eng", "SPARSE_TEXT").split())
     except Exception:
         return ""
 
@@ -248,6 +248,29 @@ def name_ocr_ready() -> bool:
     return _ocr_ready
 
 
+_tess = {}
+_tess_lock = __import__("threading").Lock()
+
+
+def _tess_text(g, langs: str, psm_name: str) -> str:
+    """tesserocr로 글 읽기. 언어 데이터를 매번 새로 불러오지 않고 (언어·psm)마다 하나를 만들어 다시 씀:
+    교환 연출 확인(_busy_text)이 0.1초마다 image_to_text를 불러 언어 데이터를 수천 번 새로 불러오면서
+    워커 메모리가 계속 늘어 몇 시간 뒤 OpenCV 'Insufficient memory'가 났음 (11-01 14:43·22:00). 요청 스레드가 여럿이라 잠금."""
+    import tesserocr
+    from PIL import Image
+    key = (langs, psm_name)
+    with _tess_lock:
+        api = _tess.get(key)
+        if api is None:
+            api = tesserocr.PyTessBaseAPI(path=TESSDATA, lang=langs, psm=getattr(tesserocr.PSM, psm_name))
+            _tess[key] = api
+        api.SetImage(Image.fromarray(g))
+        try:
+            return api.GetUTF8Text()
+        finally:
+            api.Clear()
+
+
 def ocr_title(img: np.ndarray, region) -> str:
     """제목 한 줄 읽기 (한·일·영 함께, 밝은 글자·어두운 글자 둘 다): HOME 게임 선택 화면 왼쪽 칸의 게임 이름. 두 읽기를 ' | '로 이어 줌."""
     import tesserocr
@@ -259,7 +282,7 @@ def ocr_title(img: np.ndarray, region) -> str:
     outs = []
     for im2 in (g, 255 - g):
         try:
-            outs.append(" ".join(tesserocr.image_to_text(Image.fromarray(im2), lang=langs, path=TESSDATA, psm=tesserocr.PSM.SINGLE_LINE).split()))
+            outs.append(" ".join(_tess_text(im2, langs, "SINGLE_LINE").split()))
         except Exception:
             outs.append("")
     return " | ".join(outs)
@@ -314,7 +337,7 @@ def ocr_name(img: np.ndarray, region, lang_code: str) -> str:
     if not os.path.isfile(os.path.join(TESSDATA, lang + ".traineddata")):
         lang = "eng"
     langs = lang if lang == "eng" else lang + "+eng"
-    text = tesserocr.image_to_text(Image.fromarray(g), lang=langs, path=TESSDATA, psm=tesserocr.PSM.SINGLE_BLOCK)
+    text = _tess_text(g, langs, "SINGLE_BLOCK")
     text = " ".join(text.split())
     m = re.search(r"(?i)\bwith\b(.*)$", text)
     name = (m.group(1) if m else text).strip()
@@ -333,7 +356,7 @@ def ocr_text(img: np.ndarray, region, lang_code: str = "ENG", psm: str = "SPARSE
     if not os.path.isfile(os.path.join(TESSDATA, lang + ".traineddata")):
         lang = "eng"
     langs = lang if lang == "eng" else lang + "+eng"
-    return tesserocr.image_to_text(Image.fromarray(g), lang=langs, path=TESSDATA, psm=getattr(tesserocr.PSM, psm))
+    return _tess_text(g, langs, psm)
 
 
 def gender_mark(img: np.ndarray, region=(100, 10, 460, 105)) -> int:

@@ -351,14 +351,18 @@ class Home:
         except Exception:
             return False
 
-    @staticmethod
-    def _busy_text(img):
-        """화면 가운데 글에 '통신 중'·'기다려'·오류 문구가 있는지 (교환 연출이 아니라 대기·오류 창). 글을 못 읽으면 False."""
+    def _busy_text(self, img):
+        """화면 가운데 글에 '통신 중'·'기다려'·오류 문구가 있는지 (교환 연출이 아니라 대기·오류 창). 글을 못 읽으면 False.
+        글 읽기는 무거워서 0.5초에 한 번만 (그 사이에는 지난 결과)."""
+        now = time.time()
+        if now - getattr(self, "_busy_at", 0) < 0.5: return getattr(self, "_busy_last", False)
+        self._busy_at = now
         try:
             txt = V.ocr_text(img, (60, 500, 960, 1000), "ENG").lower()
         except Exception:
-            return False
-        return any(k in txt for k in ("communicat", "please wait", "error"))
+            self._busy_last = False; return False
+        self._busy_last = any(k in txt for k in ("communicat", "please wait", "error"))
+        return self._busy_last
 
     def _pick(self, row_y, k):
         """고르기 창에서 k번째 줄 (0 = Any). 창에 9줄(0~8)이 보이고, 그 아래는 끝까지 내린 뒤 고름.

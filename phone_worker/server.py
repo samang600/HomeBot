@@ -131,6 +131,47 @@ def _config_accounts():
         return []
 
 
+MEM_LIMIT_MB = int(os.environ.get("WORKER_MEM_LIMIT_MB", "2500"))   # 워커 메모리가 이만큼 넘으면 작업이 끝난 뒤 스스로 다시 켬
+_restarting = False
+
+
+def mem_mb():
+    """(이 워커가 쓰는 메모리 MB, 컴퓨터 남은 메모리 MB). Windows가 아니거나 실패하면 (0, 0)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PMC(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD), ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t), ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t), ("PrivateUsage", ctypes.c_size_t)]
+
+        class MS(ctypes.Structure):
+            _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD), ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        pmc = PMC(); pmc.cb = ctypes.sizeof(PMC)
+        k32 = ctypes.WinDLL("kernel32"); psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb)
+        ms = MS(); ms.dwLength = ctypes.sizeof(MS); k32.GlobalMemoryStatusEx(ctypes.byref(ms))
+        return int(pmc.PrivateUsage // 1048576), int(ms.ullAvailPageFile // 1048576)
+    except Exception:
+        return 0, 0
+
+
+def restart_when_idle(why):
+    """모든 계정 작업이 끝나길 기다렸다가 종료 → 관리 창이 다시 켬 (워커 다시 켜기와 같음)."""
+    global _restarting
+    if _restarting: return
+    _restarting = True
+    def _bye():
+        got = [k for k in sorted(LOCKS) if LOCKS[k].acquire(timeout=600)]
+        log(f"{why} → 워커를 다시 켭니다" + ("" if len(got) == len(LOCKS) else " (끝나지 않는 작업이 있어 기다리지 않음)"))
+        os._exit(0)
+    threading.Thread(target=_bye, daemon=True).start()
+
+
 class H(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         b = json.dumps(obj, ensure_ascii=False).encode()
@@ -148,8 +189,9 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/ping":
+            used, free = mem_mb()
             return self._json(200, {"ok": True, "phone": HOME is not None, "name_ocr": V.name_ocr_ready(),
-                                    "busy_since": {str(k): v for k, v in BUSY_SINCE.items() if v}})
+                                    "busy_since": {str(k): v for k, v in BUSY_SINCE.items() if v}, "mem_mb": used, "free_mb": free})
         self._json(404, {"ok": False})
 
     def _form(self):
@@ -221,15 +263,7 @@ class H(BaseHTTPRequestHandler):
                     return self._json(200, {"ok": True, "msg": "", "vars": {"list": json.dumps(rows, ensure_ascii=False)}, "shot": ""})
                 if t == "exit":
                     # 워커 다시 켜기: 지금 하는 작업이 끝나길 기다렸다가(LOCK) 종료 → 관리 창이 30초 안에 다시 켬 (바뀐 코드 적용)
-                    def _bye():
-                        # 모든 계정의 작업이 끝나길 기다림. 작업이 걸려(멈춰) 10분 넘게 안 끝나면 그냥 종료
-                        got = [k for k in sorted(LOCKS) if LOCKS[k].acquire(timeout=600)]
-                        if len(got) < len(LOCKS):
-                            log("워커 종료 요청: 끝나지 않는 작업이 있어 기다리지 않고 종료 → 다시 켜짐")
-                        else:
-                            log("워커 종료 요청 → 다시 켜짐")
-                        os._exit(0)
-                    threading.Thread(target=_bye, daemon=True).start()
+                    restart_when_idle("워커 종료 요청")
                     return self._json(200, {"ok": True, "msg": "종료 예약", "vars": {}, "shot": ""})
                 acct_req = int(a.get("acct", 1) or 1)
                 if acct_req not in LOCKS:
@@ -240,6 +274,9 @@ class H(BaseHTTPRequestHandler):
                         return self._job(t, a)
                     finally:
                         BUSY_SINCE.pop(acct_req, None)
+                        used, free = mem_mb()
+                        if used >= MEM_LIMIT_MB:
+                            restart_when_idle(f"워커 메모리 {used}MB (기준 {MEM_LIMIT_MB}MB, 컴퓨터 남은 메모리 {free}MB)")
             self._json(404, {"ok": False})
         except Exception as e:
             traceback.print_exc()
