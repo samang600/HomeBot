@@ -547,6 +547,11 @@ class Home:
         if best[0] >= 5 and best[0] - second >= 3:
             self.log(f"요약으로 봇 개체 확인: {best[1][0] + 1}번 칸 ({best[0]}점, 다음 {second}점)")
             return best[1]
+        # 어버이 ID(숫자 그대로 일치)는 한 후보만 맞으면 그 개체가 거의 확실함: 레벨 1 럭키 둘처럼 능력치·기술·성별이 똑같은 다른 신청 개체가
+        # 같은 박스에 있으면 점수 차가 ID·어버이 2점뿐이라 고르지 못하고 3번 넘김 (11-01 #8841·#8820 레츠고 럭키 Lv.1)
+        if best[0] >= 8 and best[0] - second >= 2 and "ID" in best[2].split() and not any("ID" in z[2].split() for z in scores[1:]):
+            self.log(f"요약으로 봇 개체 확인 (어버이 ID가 맞는 건 하나뿐): {best[1][0] + 1}번 칸 ({best[0]}점, 다음 {second}점)")
+            return best[1]
         if best[0] >= 12 and second >= best[0] - 2:
             # 둘 다 봇 개체 정보와 거의 다 맞음 = 같은 조건으로 만든 똑같은 개체 (같은 조건 신청이 둘) → 어느 쪽을 보내도 같음
             self.log(f"요약 점수가 둘 다 높음({best[0]}·{second}) → 같은 조건 개체로 보고 {best[1][0] + 1}번 칸")
