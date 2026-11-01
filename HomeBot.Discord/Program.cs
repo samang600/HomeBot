@@ -540,6 +540,7 @@ client.Ready += async () => { _ = Task.Run(async () => { try { await SetupGameCh
 await client.LoginAsync(TokenType.Bot, token);
 await client.StartAsync();
 using var loopCts = new CancellationTokenSource();
+bool userShutdown = false;
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; loopCts.Cancel(); };
 Log("봇 시작");
 // ---- 신청자 이름 기억 (관리 창 대기열에 ID와 함께 표시 — 제재·확인용)
@@ -614,7 +615,7 @@ _ = Task.Run(async () =>
                             if (await client.GetChannelAsync(chId) is IMessageChannel ach) { try { await ach.SendMessageAsync(txt); sent++; } catch (Exception ex) { Log("공지 실패: " + ex.Message); } }
                         res = $"공지 올림 ({sent}개 채널)";
                     }
-                    else if (c == "shutdown") { res = "종료 요청"; loopCts.Cancel(); }
+                    else if (c == "shutdown") { res = "종료 요청"; userShutdown = true; loopCts.Cancel(); }
                     else if (c is "vote:on" or "vote:off") { res = orch.SetVoteMode(c.EndsWith("on")); voteSig = ""; }
                     else if (c is "hybrid:on" or "hybrid:off") res = orch.SetHybrid(c.EndsWith("on"));
                     else if (c == "logo:scan") res = orch.RequestLogoScan();
@@ -653,7 +654,7 @@ _ = Task.Run(async () =>
 });
 // ---- 상태 채널: 이름으로 켜짐/일시정지/꺼짐 표시 (디스코드는 채널 이름 변경을 10분에 2번까지만 허용 → 바뀔 때만, 횟수 지켜서)
 const string NameOn = "🟢 봇 작동 중", NamePause = "🟡 봇 일시정지", NameOff = "🔴 봇 꺼짐";
-var renames = new Queue<DateTime>(); string appliedName = null;
+var renames = new Queue<DateTime>(); string appliedName = null; int statusTicks = 0;
 async Task<IGuildChannel> StatusChannel()
 {
     var guild = client.GetGuild(cfg.Discord.GuildId); if (guild == null) return null;
@@ -694,13 +695,15 @@ _ = Task.Run(async () =>
     while (!loopCts.IsCancellationRequested)
     {
         try { if (client.ConnectionState == ConnectionState.Connected && client.GetGuild(cfg.Discord.GuildId) != null) await SetStatusName(orch.Paused ? NamePause : NameOn); } catch { }
+        // 5분마다 신청 채널 🟢/🔴도 맞춤 (껐다 바로 켜서 이름 변경 횟수 제한에 걸렸을 때 🔴로 남지 않게)
+        if (++statusTicks % 30 == 0) try { if (client.ConnectionState == ConnectionState.Connected) await SetupGameChannels(); } catch { }
         try { await Task.Delay(10000, loopCts.Token); } catch { }
     }
 });
 // ---- 신청 채널 이름에 지금 교환 중인 게임 표시 (🟢 받는 중 / 🔴 쉬는 중 / ⚫ 이 봇이 안 다루는 게임)
-async Task SetupGameChannels()
+async Task SetupGameChannels(bool allOff = false)
 {
-    string On(string g) => orch.Game == g ? "🟢" : "🔴";
+    string On(string g) => !allOff && orch.Game == g ? "🟢" : "🔴";   // 봇을 끌 때는 모두 🔴
     async Task Name(ITextChannel ch, string want)
     {
         if (ch == null || ch.Name == want) return;
@@ -986,6 +989,8 @@ _ = Task.Run(() =>
 try { await orch.RunAsync(loopCts.Token); } catch (OperationCanceledException) { }
 if (cfg.Switch.ScreenOff) sw.ScreenOn();
 try { await SetStatusName(NameOff, force: true); } catch { }
+// 관리 창에서 봇을 끈 경우에만 신청 채널도 모두 🔴 (게임 전환·다시 켜기는 곧 다시 켜지므로 그대로 — 채널 이름은 10분에 2번만 바뀜). 관리 창이 12초 뒤 강제 종료하므로 10초 안에
+if (userShutdown) try { await SetupGameChannels(allOff: true).WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
 await client.StopAsync();
 return 0;
 
