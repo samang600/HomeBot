@@ -602,7 +602,8 @@ _ = Task.Run(async () =>
                     else if (c == "worker_restart") res = phone != null ? ((await phone.ExitAsync(CancellationToken.None)).Ok ? "워커 다시 켜기 (작업이 끝난 뒤)" : "워커 다시 켜기 실패") : "워커 없음";
                     else if (p[0] == "dm" && p.Length >= 3 && long.TryParse(p[1], out var dmid)) res = await orch.AdminDmAsync(dmid, c.Split(':', 3)[2]);
                     else if (p[0] == "cancelmsg" && p.Length >= 3 && long.TryParse(p[1], out var cmid)) res = await orch.AdminCancelAsync(cmid, c.Split(':', 3)[2]);
-                    else if (c.StartsWith("bdsp_sent")) res = orch.AdminBdspSent(c.Length > 10 ? c[10..] : "");   // bdsp_sent · bdsp_sent:디아루가:이로치 · bdsp_sent:-디아루가 · bdsp_sent:clear
+                    else if (c.StartsWith("bdsp_sent")) res = orch.AdminBdspSent(c.Length > 10 ? c[10..] : "");
+                    else if (c is "bdsp_legend:on" or "bdsp_legend:off") { orch.BdspLegendBlock = c.EndsWith("on"); res = orch.BdspLegendBlock ? "브다샤펄 전설·준전설·환상 신청 받지 않음" : "브다샤펄 전설·준전설·환상 신청 다시 받음 (종마다 한 번 규칙만)"; }   // bdsp_sent · bdsp_sent:디아루가:이로치 · bdsp_sent:-디아루가 · bdsp_sent:clear
                     else if (c == "clear") res = await orch.ClearQueueAsync(false);
                     else if (c == "clear_all") res = await orch.ClearQueueAsync(true);
                     else if (c.StartsWith("announce:"))

@@ -1347,7 +1347,7 @@ public sealed class Orchestrator
             var mk = gen.FromBytes(item.PkBytes, item.Format);
             // 브다샤펄 전설·환상: 생성한 뒤에 같은 조합이 HOME으로 올라갔을 수 있음 (11-01 18:01 #8787 이로치 칠색조 — 앞 신청 #8783이 옮기는 사이 취소돼 대기열 확인을 빠져나감)
             // → HOME이 이 개체를 막아 범위 이동 전체가 실패하므로 넣기 전에 기록을 다시 확인
-            if (BdspSpecialKey(g, mk) is { } bkey && BdspSent().Contains(bkey))
+            if ((BdspSpecialKey(g, mk) is { } bkey && BdspSent().Contains(bkey)) || (BdspLegendBlock && BdspBlock(g, mk, o.Id) is { } lb && lb.StartsWith("지금은")))
             {
                 db.Reserve(item.Id, null); db.SetLocation(item.Id, Location.Gone, -1, -1);
                 var why = BdspBlock(g, mk, o.Id) ?? "HOME이 받지 않는 개체예요";
@@ -1864,8 +1864,13 @@ public sealed class Orchestrator
     private HashSet<string> BdspSent() => db.Get("bdsp_special_sent").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
     private void BdspMarkSent(string key) { var s = BdspSent(); if (s.Add(key)) db.Set("bdsp_special_sent", string.Join(",", s)); }
     /// <summary>이 개체를 받으면 안 되는 이유 (없으면 null): 이미 HOME으로 보냈거나, 같은 조합이 대기열에 이미 있음</summary>
+    /// <summary>운영자 설정: 브다샤펄 전설·준전설·환상 신청을 횟수와 상관없이 받지 않음 (기본 켜짐, 11-01 운영자 요청)</summary>
+    public bool BdspLegendBlock { get => db.Get("bdsp_legend_block") != "0"; set => db.Set("bdsp_legend_block", value ? "1" : "0"); }
     private string BdspBlock(string game, PKM pk, long selfId)
     {
+        if (BdspLegendBlock && pk is PB8 && Norm(game) == "BD"
+            && (SpeciesCategory.IsLegendary(pk.Species) || SpeciesCategory.IsSubLegendary(pk.Species) || SpeciesCategory.IsMythical(pk.Species)))
+            return $"지금은 브릴리언트 다이아몬드·샤이닝 펄로 전설·준전설·환상 포켓몬({gen.Strings.Species[pk.Species]})을 받지 않아요. 다른 게임으로 신청해 주세요";
         if (BdspSpecialKey(game, pk) is not { } key) return null;
         var name = gen.Strings.Species[pk.Species] + (pk.IsShiny ? " 이로치" : "");
         string Why(string w) => $"브릴리언트 다이아몬드·샤이닝 펄의 {name}은(는) {w}. HOME은 브다샤펄 세이브 하나에서 전설·환상을 종마다 일반색·이로치 각각 한 번만 받아요. 다른 게임으로 신청해 주세요";
