@@ -14,7 +14,8 @@ cp "$ROOT/dist/HomeBot 시작.bat" "$ROOT/dist/설치.ps1" "$ROOT/dist/사용법
 cp "$ROOT/config.sample.json" "$STAGE/homebot/"
 cp -r "$ROOT/macros" "$ROOT/gui" "$ROOT/phone_worker" "$STAGE/homebot/"
 find "$STAGE" -name "__pycache__" -prune -exec rm -rf {} +
-rm -rf "$STAGE/homebot/phone_worker/shots" "$STAGE/homebot/gui/gui_settings.json"
+rm -rf "$STAGE/homebot/phone_worker/shots" "$STAGE/homebot/phone_worker/tests" "$STAGE/homebot/gui/gui_settings.json"
+find "$STAGE" -name ".pytest_cache" -prune -exec rm -rf {} +
 if [ -n "$FTPZIP" ]; then cp "$FTPZIP" "$STAGE/스위치에 넣을 것/ftpsrv_savefix.zip"
 else echo "주의: ftpsrv_savefix.zip 없이 묶음 (switch/ftpsrv/README.md 참고해 빌드한 zip을 두 번째 인자로)"; fi
 

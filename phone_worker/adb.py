@@ -113,8 +113,8 @@ class Adb:
                         return self._fit(img)
                 self.sf_display = None
                 raise RuntimeError(f"raw 캡처 실패 ({len(b)}바이트): {b[:80]!r}")
-            except RuntimeError:
-                raise
+            except (RuntimeError, subprocess.TimeoutExpired):
+                raise                                        # adb 오류·시간 초과는 일시적 → raw를 끄지 않고 그대로 알림
             except Exception:
                 self._raw_ok = False                         # 이 기기에서 raw가 안 되면 PNG로
         img = cv2.imdecode(np.frombuffer(self.screenshot(), np.uint8), cv2.IMREAD_COLOR)

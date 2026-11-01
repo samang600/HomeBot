@@ -187,6 +187,7 @@ class Proc:
         return self.p is not None and self.p.poll() is None
 
     def start(self):
+        self._stopped_by_user = False                   # 사용자가 직접 멈춘 것만 자동 재시작하지 않음
         if self.running():
             return
         self.q.put((self.name, f"──── {time.strftime('%H:%M:%S')} 시작: {' '.join(self.args)}\n"))
@@ -206,7 +207,7 @@ class Proc:
         self.q.put((self.name, f"──── {time.strftime('%H:%M:%S')} 끝남 (코드 {code})\n"))
 
     def stop(self):
-        kill_tree(self.p)
+        self._stopped_by_user = True; kill_tree(self.p)
 
 
 class BotProc(Proc):
@@ -221,11 +222,20 @@ class BotProc(Proc):
         p = self.p
         def later():
             try: p.wait(timeout=12)
-            except Exception: kill_tree(p)
+            except Exception: self._kill(p)
         threading.Thread(target=later, daemon=True).start()
 
     def stop_now(self):
-        self._stopped_by_user = True; kill_tree(self.p)
+        self._stopped_by_user = True; self._kill(self.p)
+
+    @staticmethod
+    def _kill(p):
+        """강제 종료. 봇이 못 읽은 'shutdown'이 cmd.txt에 남으면 다음에 켜자마자 꺼지므로 지움."""
+        was = p is not None and p.poll() is None
+        kill_tree(p)
+        if was:
+            try: os.remove(os.path.join(DATA, "cmd.txt"))
+            except Exception: pass
 
 
 class WorkerProc(Proc):
@@ -908,9 +918,17 @@ class App(tk.Tk):
 
     # ---------- 주기 확인
     def _ping(self):
+        return self._ping_info() is not None
+
+    def _ping_info(self):
+        """워커 /ping 응답(JSON dict). 응답 없으면 None."""
+        import json
         try:
-            with urllib.request.urlopen(worker_url() + "/ping", timeout=1) as r: return r.status == 200
-        except Exception: return False
+            with urllib.request.urlopen(worker_url() + "/ping", timeout=1) as r:
+                if r.status != 200: return None
+                try: return json.loads(r.read().decode("utf-8", "ignore")) or {}
+                except Exception: return {}
+        except Exception: return None
 
     def _lamp(self, key, color, text):
         c, dot, v = self.lamps[key]; c.itemconfigure(dot, fill=color); v.configure(text=text)
@@ -920,7 +938,8 @@ class App(tk.Tk):
         self.after(1500, self._tick)
 
     def _check(self):
-        bot_on = self.bot.running(); w_on = self.worker.running(); ping = self._ping()
+        bot_on = self.bot.running(); w_on = self.worker.running(); info = self._ping_info(); ping = info is not None
+        self._watchdog(info)
         mumu = None
         if shutil.which("adb"):
             try:
@@ -951,6 +970,19 @@ class App(tk.Tk):
         except Exception: pass
         self.after(0, self._show, bot_on, w_on, ping, mumu, status)
         self.after(0, self._q_refresh, rows)
+
+    WORKER_HANG = 600   # 한 계정 작업이 이만큼(초) 넘게 안 끝나면 워커가 멈춘 것으로 보고 다시 켬
+
+    def _watchdog(self, info):
+        """워커 작업이 10분 넘게 안 끝나면 (잠금이 풀리지 않아 다음 작업도 다 막힘) 워커를 강제로 끔 → 아래 자동 재시작이 다시 켬."""
+        try:
+            busy = (info or {}).get("busy_since") or {}
+            if not busy or not self.worker.running(): return
+            acct, since = max(((k, float(v)) for k, v in busy.items()), key=lambda z: time.time() - z[1])
+            if time.time() - since > self.WORKER_HANG:
+                self.q.put((self.worker.name, f"──── {time.strftime('%H:%M:%S')} 워커 작업이 {int((time.time() - since) // 60)}분째 안 끝남 (계정 {acct}) → 워커를 강제로 끄고 다시 켭니다\n"))
+                kill_tree(self.worker.p)                     # _stopped_by_user는 그대로(False) → 자동 재시작
+        except Exception: pass
 
     def _show(self, bot_on, w_on, ping, mumu, status):
         try:
@@ -1000,15 +1032,6 @@ class App(tk.Tk):
             except Exception: self.bot.stop_now()
         self.destroy()
 
-
-# 사용자가 직접 멈춘 것은 자동 재시작하지 않도록 표시
-_orig_stop = Proc.stop
-def _stop(self):
-    self._stopped_by_user = True; _orig_stop(self)
-_orig_start = Proc.start
-def _start(self):
-    self._stopped_by_user = False; _orig_start(self)
-Proc.stop = _stop; Proc.start = _start
 
 if __name__ == "__main__":
     try:

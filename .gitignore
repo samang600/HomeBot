@@ -6,3 +6,4 @@ shots/
 config.json
 gui/gui_settings.json
 out/
+.pytest_cache/

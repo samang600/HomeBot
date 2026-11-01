@@ -17,10 +17,117 @@ SHOT_DIR = os.environ.get("SHOT_DIR", os.path.join(os.path.dirname(os.path.abspa
 GRID_FILE = os.path.join(V.TPL_DIR, "phone", "box_grid.json")
 
 
+SHOT_KEEP_DAYS = 3
+
+
+def _clean_shots(now=None):
+    """스크린샷 폴더에서 3일 넘은 PNG를 지움 (24시간 돌면 수만 장이 쌓임). 실패해도 무시."""
+    try:
+        cut = (now or time.time()) - SHOT_KEEP_DAYS * 86400
+        with os.scandir(SHOT_DIR) as it:
+            for e in it:
+                try:
+                    if e.name.endswith(".png") and e.is_file() and e.stat().st_mtime < cut:
+                        os.remove(e.path)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
 class FlowError(Exception):
     def __init__(self, msg, shot=""):
         super().__init__(msg)
         self.shot = shot
+
+
+# ---- GTS 박스에서 봇 포켓몬 칸 고르기 판단 (화면 조작 없는 순수 함수 — tests/test_pick.py 에서 시험)
+def _norm(t):
+    import unicodedata
+    t = unicodedata.normalize("NFKC", t or "")
+    return "".join(ch for ch in t if ch.isalnum()).lower()
+
+
+def _ratio(wants, t):
+    import difflib
+    return max(difflib.SequenceMatcher(None, w, t).ratio() for w in wants)
+
+
+def pick_mode(ocr_ready, nick, slot=0, total=1, fp=None):
+    """박스 고르기 화면에서 어떻게 고를지: 'name' (이름을 읽어 고름) / 'blind' (이름 인식 없이 첫 칸). 고를 수 없으면 FlowError."""
+    if nick and ocr_ready:
+        return "name"
+    if nick or fp or total > 1:
+        # 이름 인식이 안 되면 첫 칸을 그냥 보내면 남은 개체·다른 신청 개체가 나갈 수 있음 → 고르지 않고 멈춤 (봇이 일시정지·알림)
+        raise FlowError("이름 인식(OCR)이 준비되지 않아 봇 포켓몬을 확인할 수 없음 (tesserocr·tessdata 확인 필요)" if not ocr_ready
+                        else "봇 포켓몬 이름이 없어 GTS 박스에서 확인할 수 없음")
+    if slot > 0:
+        raise FlowError("이름 인식 없이 2번째 이후 칸은 고를 수 없음 (화면 순서가 달라 다른 포켓몬이 나갈 수 있음)")
+    return "blind"
+
+
+def can_skip_read(n_slots, total=1, fp=None):
+    """이름을 읽지 않고 바로 그 칸을 보내도 되는지: 봇 개체 하나·화면에 한 마리·지문(fp) 없음일 때만.
+    fp가 있으면 같은 종의 남은 개체일 수 있으니 반드시 이름(필요하면 요약)으로 확인."""
+    return total == 1 and n_slots == 1 and not fp
+
+
+def choose_slot(wants, norm, n_slots, total=1, nth=0, fp=None):
+    """읽은 이름으로 칸 고르기.
+    wants: 찾는 이름들(_norm 한 것), norm: [(칸, _norm 이름, 읽은 글, ...)] (메뉴 창이 뜬 칸만), n_slots: 화면에 보이는 칸 수.
+    반환: ('slot', 칸 항목, 로그) / ('summary', 후보 목록, 로그) / ('fail', None, 오류 문장)."""
+    strict = [e for e in norm if e[1] in wants]
+    exact = strict or [e for e in norm if any(len(w) >= 2 and w in e[1] for w in wants)]
+    # 창 문장을 통째로 읽다 'with' 등이 깨져 앞에 군더더기가 붙는 경우 (예: 'What do you want to 001 킬라플로르') → 이름이 들어 있으면 같은 것으로 봄
+    readn = ", ".join(e[2] for e in norm)
+    read = ", ".join(f"{e[0] + 1}:{e[2]}" for e in norm) or "없음"
+    if total > 1 and fp:
+        # 같은 이름의 봇 개체가 여럿: 후보마다 요약(Summary)을 열어 레벨·성별·능력치·기술·어버이·ID로 봇이 만든 개체를 직접 확인
+        cand = exact; msg = ""
+        if len(cand) < total:
+            cand = [e for e in norm if _ratio(wants, e[1]) >= 0.6]
+        if len(cand) < total and len(norm) > len(cand):
+            # 이름으로 찾은 칸이 봇 개체 수보다 적음 (한 칸 이름을 못 읽음 등, #2498 사례: 다른 신청 개체 하나만 확인하고 실패)
+            # GTS 박스엔 상대가 원하는 종류만 보이므로 보이는 칸 전부를 요약 화면으로 확인
+            msg = f"같은 이름 후보 {len(cand)}칸 < 봇 개체 {total}마리 (읽은 이름: {readn}) → 보이는 칸 전부 요약 화면으로 확인"
+            cand = norm
+        if not cand and norm:
+            msg = f"같은 이름 후보를 이름으로 못 찾음 (읽은 이름: {readn}) → 보이는 칸 전부 요약 화면으로 확인"
+            cand = norm
+        if not cand:
+            return "fail", None, "같은 이름 후보를 찾지 못함 (메뉴 창이 뜬 칸 없음)"
+        return "summary", cand, msg
+    if total > 1:
+        # 같은 이름의 봇 개체가 여럿: HOME 칸 순서 = 화면 순서이므로 nth번째를 고름. 보이는 수가 봇 개체 수와 다르면
+        # (받은 포켓몬이 같은 이름이거나, 상대 조건 때문에 일부가 안 보이거나, 이름을 잘못 읽음) 엉뚱한 걸 보낼 수 있어 고르지 않음
+        cand = exact
+        if len(cand) != total:
+            fuzzy = [e for e in norm if _ratio(wants, e[1]) >= 0.75]
+            if len(fuzzy) == total:
+                cand = fuzzy
+        if len(cand) != total or not (0 <= nth < total):
+            return "fail", None, f"같은 이름 봇 개체 {total}마리 중 {nth + 1}번째를 고르려 했지만 화면에 맞는 칸이 {len(cand)}개 (읽은 이름: {read})"
+        return "slot", sorted(cand, key=lambda e: e[0])[nth], f"같은 이름 {total}마리 중 {nth + 1}번째 칸을 고름"
+    if fp:
+        # 봇 개체 한 마리 + 지문 있음: 이름이 정확히 같은 칸이 하나뿐이고, 나머지 칸도 모두 읽혀 분명히 다른 이름일 때만 요약 확인 없이 고름.
+        # 같은 종의 남은 개체(취소된 신청·받은 포켓몬)는 종 이름이 똑같거나, 이름을 못 읽은 칸이 사실 봇 개체일 수 있음 → 요약으로 확인
+        unclear = [e for e in norm if e not in strict and (len(e[1]) < 2 or _ratio(wants, e[1]) >= 0.6 or any(len(w) >= 2 and w in e[1] for w in wants))]
+        if len(strict) == 1 and not unclear and len(norm) == n_slots:
+            return "slot", strict[0], ""
+        cand = sorted(strict + unclear, key=lambda e: e[0]) or list(norm)
+        if not cand:
+            return "fail", None, f"GTS 박스에서 찾는 이름을 찾지 못함 (읽은 이름: {read})"
+        return "summary", cand, f"이름만으로 확실하지 않음 (읽은 이름: {readn}, 화면 {n_slots}칸) → 요약 화면으로 확인"
+    if len(exact) == 1:
+        return "slot", exact[0], ""
+    if len(exact) > 1:
+        return "fail", None, f"같은 이름 '{exact[0][2]}'이 {len(exact)}칸 있어 어느 것인지 알 수 없음"
+    scored = sorted(((_ratio(wants, e[1]), e) for e in norm), key=lambda z: -z[0])
+    if len(scored) == 1 and scored[0][0] >= 0.5:
+        return "slot", scored[0][1], f"한 마리뿐이라 고름: '{scored[0][1][2]}' ({scored[0][0]:.2f})"
+    if scored and scored[0][0] >= 0.75 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.2):
+        return "slot", scored[0][1], f"비슷한 이름으로 고름: '{scored[0][1][2]}' ({scored[0][0]:.2f})"
+    return "fail", None, f"GTS 박스에서 찾는 이름을 찾지 못함 (읽은 이름: {read})"
 
 
 class Home:
@@ -43,11 +150,15 @@ class Home:
             img = self.adb.capture()
         return img
 
+    _saves = 0
+
     def save_shot(self, img, tag):
         os.makedirs(SHOT_DIR, exist_ok=True)
-        import cv2
         p = os.path.join(SHOT_DIR, f"{time.strftime('%Y%m%d_%H%M%S')}_{tag}.png")
         V.imwrite(p, img)
+        Home._saves += 1
+        if Home._saves % 200 == 1:
+            _clean_shots()
         return p
 
     def dismiss_error(self, img):
@@ -140,148 +251,6 @@ class Home:
             g = json.load(f)
         cols = g.get("cols", 6)
         return g["x0"] + (slot % cols) * g["dx"], g["y0"] + (slot // cols) * g["dy"]
-
-    def goto_box(self, box):
-        """현재 박스 번호를 OCR로 읽어 목표 박스까지 좌우 화살표. 깡계는 박스 1개라 할 일 없음."""
-        if box <= 0:
-            return
-        for _ in range(250):
-            img = self.shot()
-            cur = V.ocr(img, self._box_no_region()) if self._box_no_region() else ""
-            n = "".join(ch for ch in cur if ch.isdigit())
-            if n and int(n) - 1 == box:
-                return
-            self.tap_tpl("home_box_next", 3)
-        raise FlowError(f"박스 {box + 1}로 이동 실패")
-
-    def _box_no_region(self):
-        p = os.path.join(V.TPL_DIR, "phone", "box_no_region.json")
-        if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                return json.load(f)["region"]
-        return None
-
-    # ---- 공통: 앱 열고 메인까지
-    def open_main(self):
-        self.adb.launch()
-        time.sleep(3)
-        for _ in range(6):   # 공지·업데이트 팝업 닫기
-            if self.seen("home_main"):
-                return
-            for n in ("home_popup_close", "home_popup_ok", "home_title_tap"):
-                if self.seen(n):
-                    self.tap_tpl(n, 2)
-                    break
-            else:
-                time.sleep(2)
-        self.expect("home_main", 30)
-
-    def open_boxes(self):
-        self.open_main()
-        self.tap_tpl("home_menu_pokemon")
-        self.expect("home_boxes", 30)
-
-    # ---- GTS
-    def gts_deposit(self, box, slot, species_name, gender, level_min, level_max):
-        """박스 칸의 포켓몬을 GTS에 맡기고 원하는 포켓몬 조건을 설정."""
-        self.open_main()
-        self.tap_tpl("home_menu_trade")
-        self.tap_tpl("home_trade_gts")
-        self.expect("home_gts_main", 20)
-        self.tap_tpl("home_gts_deposit")
-        self.expect("home_boxes", 20)
-        self.goto_box(box)
-        x, y = self.grid(slot)
-        self.tap(x, y)
-        self.tap_tpl("home_gts_select_this")        # '이 포켓몬을 맡긴다'
-        # 원하는 포켓몬: 종 이름 검색 (한글 입력은 adb input text가 안 되므로 자판 템플릿 또는 클립보드 방식 필요)
-        self.tap_tpl("home_gts_want_species")
-        self._type_korean(species_name)
-        self.tap_tpl("home_gts_search_result_first")
-        if gender in (0, 1):
-            self.tap_tpl("home_gts_want_gender")
-            self.tap_tpl("home_gts_gender_male" if gender == 0 else "home_gts_gender_female")
-        self.tap_tpl("home_gts_want_level")
-        self.tap_tpl(f"home_gts_level_{level_min}_{level_max}")   # 레벨 구간 버튼 템플릿 (예: home_gts_level_1_10)
-        self.tap_tpl("home_gts_deposit_confirm")
-        self.expect("home_gts_deposited", 30)
-        return {"deposited": "1"}
-
-    def gts_collect(self):
-        """맡긴 포켓몬이 교환됐는지 확인. 됐으면 받은 포켓몬을 받아 박스로. 반환 vars: traded=1/0."""
-        self.open_main()
-        self.tap_tpl("home_menu_trade")
-        self.tap_tpl("home_trade_gts")
-        self.expect("home_gts_main", 20)
-        if self.seen("home_gts_traded_badge"):
-            self.tap_tpl("home_gts_traded_badge")
-            self.tap_tpl("home_gts_receive")
-            self.expect("home_gts_received", 30)
-            self.tap_tpl("home_popup_ok", 5)
-            return {"traded": "1"}
-        return {"traded": "0"}
-
-    def gts_withdraw(self):
-        self.open_main()
-        self.tap_tpl("home_menu_trade")
-        self.tap_tpl("home_trade_gts")
-        self.expect("home_gts_main", 20)
-        self.tap_tpl("home_gts_my_deposit")
-        self.tap_tpl("home_gts_withdraw")
-        self.tap_tpl("home_popup_ok", 5)
-        return {}
-
-    # ---- 친구 교환 (프리미엄)
-    def friend_trade(self, box, slot, friend_name):
-        self.open_main()
-        self.tap_tpl("home_menu_trade")
-        self.tap_tpl("home_trade_friend")
-        self.expect("home_friend_list", 20)
-        # 친구 목록에서 이름 찾기: 목록을 넘기며 OCR
-        if not self._find_in_list(friend_name):
-            raise FlowError(f"친구 목록에서 '{friend_name}'을 찾지 못함")
-        self.tap_tpl("home_friend_trade_request")
-        self.expect("home_friend_partner_ready", 180)   # 상대 수락 대기
-        self.expect("home_boxes", 30)
-        self.goto_box(box)
-        x, y = self.grid(slot)
-        self.tap(x, y)
-        self.tap_tpl("home_trade_offer")
-        self.expect("home_trade_both_ready", 180)
-        self.tap_tpl("home_trade_confirm")
-        self.expect("home_trade_done", 90)
-        self.tap_tpl("home_popup_ok", 5)
-        return {}
-
-    def _find_in_list(self, name):
-        for _ in range(30):
-            img = self.shot()
-            txt = V.ocr(img)
-            if name and name in txt:
-                # 이름 위치는 OCR 결과 좌표가 필요 → 단순화: 템플릿 'home_friend_row'의 첫 행 탭 후 이름 재확인
-                return True
-            self.adb.swipe(540, 1600, 540, 900, 400)
-            time.sleep(0.8)
-        return False
-
-    # ---- 놓아주기
-    def release(self, slots):
-        self.open_boxes()
-        done = 0
-        for box, slot in slots:
-            self.goto_box(box)
-            x, y = self.grid(slot)
-            self.tap(x, y)
-            if not self.seen("home_slot_menu"):      # 빈 칸이면 메뉴가 안 뜸
-                self.adb.back(); time.sleep(0.5)
-                continue
-            self.tap_tpl("home_slot_release")
-            self.tap_tpl("home_release_confirm")
-            self.tap_tpl("home_release_confirm2", 5)   # '정말로?' 두 번째 확인이 있으면
-            self.tap_tpl("home_popup_ok", 5)
-            done += 1
-        return {"released": str(done)}
-
 
     # ================= 역 GTS: 사용자가 올린 '열쇠 포켓몬'을 찾아 봇 포켓몬(HOME 1-1)과 교환 =================
     # 좌표는 MuMu 1080x1920 기준 (기록 20261024_011719)
@@ -382,6 +351,15 @@ class Home:
         except Exception:
             return False
 
+    @staticmethod
+    def _busy_text(img):
+        """화면 가운데 글에 '통신 중'·'기다려'·오류 문구가 있는지 (교환 연출이 아니라 대기·오류 창). 글을 못 읽으면 False."""
+        try:
+            txt = V.ocr_text(img, (60, 500, 960, 1000), "ENG").lower()
+        except Exception:
+            return False
+        return any(k in txt for k in ("communicat", "please wait", "error"))
+
     def _pick(self, row_y, k):
         """고르기 창에서 k번째 줄 (0 = Any). 창에 9줄(0~8)이 보이고, 그 아래는 끝까지 내린 뒤 고름.
         k == 0 이면 기본값(Any) 그대로라 누르지 않음 — 성별 없는 포켓몬은 Gender 칸이 눌리지 않아 창이 안 뜸."""
@@ -422,9 +400,7 @@ class Home:
 
     @staticmethod
     def _norm(t):
-        import unicodedata
-        t = unicodedata.normalize("NFKC", t or "")
-        return "".join(ch for ch in t if ch.isalnum()).lower()
+        return _norm(t)
 
     def _occupied(self, img, max_slots=30):
         """GTS 박스 고르기 화면에서 포켓몬이 있는 칸 번호들 (빈 칸은 매끈한 배경이라 밝기 변화가 거의 없음)."""
@@ -442,8 +418,7 @@ class Home:
     def _pick_by_name(self, nick, nick_lang, max_slots=30, nth=0, total=1, fp=None):
         """GTS 박스 고르기 화면에서 포켓몬이 있는 칸을 모두 눌러 메뉴 창의 이름을 읽은 뒤, 봇 포켓몬(nick)과 맞는 칸 하나를 골라
         'Offer as a trade' 위치를 돌려줌. nick은 '닉네임|영어종이름'처럼 후보 여러 개 가능. 정확히 같은 이름을 먼저, 없으면 비슷한 이름이
-        하나뿐일 때만 고름 (피츄/피카츄처럼 헷갈리면 고르지 않고 실패)."""
-        import difflib
+        하나뿐일 때만 고름 (피츄/피카츄처럼 헷갈리면 고르지 않고 실패). 판단은 choose_slot (순수 함수)."""
         wants = [self._norm(w) for w in str(nick).split("|") if self._norm(w)]
         if not wants:
             raise FlowError("내보낼 포켓몬 이름이 없어 고를 수 없음")
@@ -451,8 +426,8 @@ class Home:
         slots = self._occupied(shot0)
         if not slots:
             raise FlowError("GTS 박스 화면에 포켓몬이 보이지 않음", self.save_shot(shot0, "fail_name"))
-        if total == 1 and len(slots) == 1:
-            # GTS 박스는 상대가 원하는 종류만 보여 줌 + 봇 개체도 하나 → 이름을 읽지 않고 바로 그 칸 (한 건에 몇 초 절약)
+        if can_skip_read(len(slots), total, fp):
+            # GTS 박스는 상대가 원하는 종류만 보여 줌 + 봇 개체도 하나 + 지문 없음 → 이름을 읽지 않고 바로 그 칸 (한 건에 몇 초 절약)
             i = slots[0]
             sx, sy = self.grid(i)
             self.tap(sx, sy, 0.1)
@@ -481,73 +456,14 @@ class Home:
             seen.append((i, text, bx, by))
             self._close_dialog()                                    # X로 닫고 다음 칸
         norm = [(i, self._norm(t), t, bx, by) for i, t, bx, by in seen]
-        exact = [e for e in norm if e[1] in wants]
-        if not exact:
-            # 창 문장을 통째로 읽다 'with' 등이 깨져 앞에 군더더기가 붙는 경우 (예: 'What do you want to 001 킬라플로르') → 이름이 들어 있으면 같은 것으로 봄
-            exact = [e for e in norm if any(len(w) >= 2 and w in e[1] for w in wants)]
-        if total > 1 and fp:
-            # 같은 이름의 봇 개체가 여럿: 후보마다 요약(Summary)을 열어 레벨·성별·능력치·기술·어버이·ID로 봇이 만든 개체를 직접 확인
-            cand = exact
-            if len(cand) < total:
-                cand = [e for e in norm if max(difflib.SequenceMatcher(None, w, e[1]).ratio() for w in wants) >= 0.6]
-            if len(cand) < total and len(norm) > len(cand):
-                # 이름으로 찾은 칸이 봇 개체 수보다 적음 (한 칸 이름을 못 읽음 등, #2498 사례: 다른 신청 개체 하나만 확인하고 실패)
-                # GTS 박스엔 상대가 원하는 종류만 보이므로 보이는 칸 전부를 요약 화면으로 확인
-                self.log(f"같은 이름 후보 {len(cand)}칸 < 봇 개체 {total}마리 (읽은 이름: {', '.join(e[2] for e in norm)}) → 보이는 칸 전부 요약 화면으로 확인")
-                cand = norm
-            if not cand and norm:
-                # 이름을 못 읽음 (글자가 깨져 특수문자만 읽힘 등). GTS 박스엔 상대가 원하는 종류만 보이므로 보이는 칸 전부를 요약 화면으로 확인
-                self.log(f"같은 이름 후보를 이름으로 못 찾음 (읽은 이름: {', '.join(e[2] for e in norm)}) → 보이는 칸 전부 요약 화면으로 확인")
-                cand = norm
-            if not cand:
-                raise FlowError("같은 이름 후보를 찾지 못함 (메뉴 창이 뜬 칸 없음)", self.save_shot(self.shot(), "fail_name"))
-            chosen = self._pick_by_summary(cand, fp, nick_lang)
-        elif total > 1:
-            # 같은 이름의 봇 개체가 여럿: HOME 칸 순서 = 화면 순서이므로 nth번째를 고름. 보이는 수가 봇 개체 수와 다르면
-            # (받은 포켓몬이 같은 이름이거나, 상대 조건 때문에 일부가 안 보이거나, 이름을 잘못 읽음) 엉뚱한 걸 보낼 수 있어 고르지 않음
-            cand = exact
-            if len(cand) != total:
-                fuzzy = [e for e in norm if max(difflib.SequenceMatcher(None, w, e[1]).ratio() for w in wants) >= 0.75]
-                if len(fuzzy) == total:
-                    cand = fuzzy
-            if len(cand) != total or not (0 <= nth < total):
-                read = ", ".join(f"{e[0] + 1}:{e[2]}" for e in norm) or "없음"
-                raise FlowError(f"같은 이름 봇 개체 {total}마리 중 {nth + 1}번째를 고르려 했지만 화면에 맞는 칸이 {len(cand)}개 (읽은 이름: {read})", self.save_shot(self.shot(), "fail_name"))
-            cand = sorted(cand, key=lambda e: e[0])
-            chosen = cand[nth]
-            self.log(f"같은 이름 {total}마리 중 {nth + 1}번째 칸을 고름")
-        elif len(exact) == 1:
-            chosen = exact[0]
-        elif len(exact) > 1 and fp:
-            # 기록상 한 마리인데 같은 이름이 여럿 보임 (취소된 신청의 남은 개체·받은 포켓몬 등) → 요약으로 봇 개체를 확인
-            self.log(f"같은 이름 '{exact[0][2]}' {len(exact)}칸 → 요약 화면으로 확인")
-            chosen = self._pick_by_summary(exact, fp, nick_lang)
-        elif len(exact) > 1:
-            raise FlowError(f"같은 이름 '{exact[0][2]}'이 {len(exact)}칸 있어 어느 것인지 알 수 없음", self.save_shot(self.shot(), "fail_name"))
-        else:
-            scored = []
-            for e in norm:
-                sc = max(difflib.SequenceMatcher(None, w, e[1]).ratio() for w in wants)
-                scored.append((sc, e))
-            scored.sort(key=lambda z: -z[0])
-            # GTS 박스는 상대가 원하는 종류만 보여 주므로, 한 마리만 보이면 그게 봇 포켓몬 (글자 하나 잘못 읽어도: 갑주무사→감주무사)
-            if scored and len(scored) == 1 and total == 1 and len(slots) == 1:
-                # GTS 박스는 상대가 원하는 종류만 보여 주고, 봇 개체도 한 마리뿐 → 이름을 못 읽어도(외국어 닉네임 등) 그게 봇 포켓몬
-                chosen = scored[0][1]
-                self.log(f"화면에 한 마리뿐이라 고름: '{chosen[2]}' ({scored[0][0]:.2f}) ← 찾는 이름 {nick}")
-            elif scored and len(scored) == 1 and scored[0][0] >= 0.5:
-                chosen = scored[0][1]
-                self.log(f"한 마리뿐이라 고름: '{chosen[2]}' ({scored[0][0]:.2f}) ← 찾는 이름 {nick}")
-            elif scored and scored[0][0] >= 0.75 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.2):
-                chosen = scored[0][1]
-                self.log(f"비슷한 이름으로 고름: '{chosen[2]}' ({scored[0][0]:.2f}) ← 찾는 이름 {nick}")
-            elif fp and norm:
-                # 이름을 못 읽음 (한글 닉네임 OCR 실패 등). GTS 박스엔 상대가 원하는 종류만 보이므로 보이는 칸들을 요약 화면으로 확인해 봇 개체를 고름
-                self.log(f"이름으로 못 고름 (읽은 이름: {', '.join(e[2] for e in norm)}) → 요약 화면으로 확인")
-                chosen = self._pick_by_summary(norm, fp, nick_lang)
-            else:
-                read = ", ".join(f"{e[0] + 1}:{e[2]}" for e in norm) or "없음"
-                raise FlowError(f"GTS 박스에서 '{nick}'을 찾지 못함 (읽은 이름: {read})", self.save_shot(self.shot(), "fail_name"))
+        kind, chosen, msg = choose_slot(wants, norm, len(slots), total, nth, fp)
+        if kind == "fail":
+            raise FlowError(f"{msg} ← 찾는 이름 '{nick}'", self.save_shot(self.shot(), "fail_name"))
+        if kind == "summary":
+            if msg: self.log(msg)
+            chosen = self._pick_by_summary(chosen, fp, nick_lang)
+        elif msg:
+            self.log(f"{msg} ← 찾는 이름 {nick}")
         i = chosen[0]
         sx, sy = self.grid(i)
         self.tap(sx, sy, 0.1)
@@ -629,15 +545,21 @@ class Home:
         best = scores[0]
         second = scores[1][0] if len(scores) > 1 else -99
         if best[0] >= 5 and best[0] - second >= 3:
-            pass
-        elif best[0] >= 12 and second >= best[0] - 2:
+            self.log(f"요약으로 봇 개체 확인: {best[1][0] + 1}번 칸 ({best[0]}점, 다음 {second}점)")
+            return best[1]
+        if best[0] >= 12 and second >= best[0] - 2:
             # 둘 다 봇 개체 정보와 거의 다 맞음 = 같은 조건으로 만든 똑같은 개체 (같은 조건 신청이 둘) → 어느 쪽을 보내도 같음
             self.log(f"요약 점수가 둘 다 높음({best[0]}·{second}) → 같은 조건 개체로 보고 {best[1][0] + 1}번 칸")
             return best[1]
-        if best[0] >= 5 and best[0] - second >= 3:
-            self.log(f"요약으로 봇 개체 확인: {best[1][0] + 1}번 칸 ({best[0]}점, 다음 {second}점)")
-            return best[1]
         detail = ", ".join(f"{z[1][0] + 1}번 {z[0]}점({z[2]})" for z in scores)
+        # 어느 후보도 능력치·기술이 하나도 안 맞음 = 박스에 보이는 게 봇 포켓몬이 아님 (HOME은 그 글이 '원하는 포켓몬'만 보여 줌)
+        # → 다른 사람의 같은 조건 글(예: 흔한 레벨 1 개체)을 잡은 것. 봇 오류로 세지 않고 다른 글을 다시 찾게 함 (10-31 #6937: 비비용인데 타부자고 둘만 보임)
+        import re
+        def hits(why):
+            a = re.search(r"능력치(\d+)/", why); b = re.search(r"기술(\d+)", why)
+            return (int(a.group(1)) if a else 0) + (int(b.group(1)) if b else 0)
+        if fp and fp.get("stats") and all(hits(z[2]) == 0 for z in scores):
+            raise FlowError(f"WANT_MISMATCH: 박스에 보이는 포켓몬이 봇 포켓몬이 아님 (찾은 글이 다른 포켓몬을 원함): {detail}", self.save_shot(self.shot(), "want_mismatch_summary"))
         raise FlowError(f"요약으로도 봇 개체를 확실히 고르지 못함: {detail}", self.save_shot(self.shot(), "fail_summary"))
 
     def gts_find_trade(self, species_name, gender=-1, level=0, lang="", slot=0, dry=False, fresh=False, nick="", nick_lang="", nth=0, total=1, fp=None):
@@ -645,6 +567,7 @@ class Home:
         반환 vars: found(검색 결과 수), traded=1/0.  dry=True 이면 확인 창에서 취소."""
         if not species_name or any(ord(c) > 127 for c in species_name):
             raise FlowError(f"HOME(영어)에 입력할 수 없는 이름: {species_name}")
+        mode = pick_mode(V.name_ocr_ready(), nick, slot, total, fp)   # 이름 인식 없이 고를 수 없는 경우는 GTS에 들어가기 전에 멈춤
         T = [("시작", time.time())]; self._shot_n = 0; self._shot_t = 0.0
         def mark(n): T.append((n, time.time()))
         def dump(res):
@@ -739,12 +662,10 @@ class Home:
             time.sleep(0.12)
         mark("박스")
         time.sleep(0.3)                                     # 칸 그림이 다 그려진 뒤 빈 칸 판단
-        if nick and V.name_ocr_ready():
+        if mode == "name":
             x, y = self._pick_by_name(nick, nick_lang, nth=nth, total=total, fp=fp)       # 이름을 읽어 봇 포켓몬을 골라냄 (화면 순서가 HOME 칸 순서와 다름)
         else:
-            if slot > 0:
-                raise FlowError("이름 인식 없이 2번째 이후 칸은 고를 수 없음 (화면 순서가 달라 다른 포켓몬이 나갈 수 있음)")
-            sx, sy = self.grid(0)                           # 이름 인식이 없으면 예전처럼 첫 칸 (한 마리씩일 때만 안전)
+            sx, sy = self.grid(0)                           # 이름 인식도 지문도 없으면 예전처럼 첫 칸 (봇 개체 한 마리일 때만)
             self.tap(sx, sy, 1.5)
             try:
                 x, y = self.expect("ph_send_menu", 6)
@@ -755,18 +676,26 @@ class Home:
         if SKIP_TRADE_ANIM:
             # 교환 연출을 기다리지 않음. 단, 반드시 '교환 버튼 → 연출 시작'을 확인한 뒤에만 앱을 끔.
             # 연출 시작 = 박스/보내기 메뉴가 사라지고, 오류·확인 창도 아닌 화면이 연속 2번 보일 때.
-            # 캡처가 빨라져 장 수 대신 시간으로 봄: 아는 화면이 아닌 상태가 1.2초 넘게 이어지고 3장 이상일 때
+            # 연출 화면 템플릿이 없어 '아는 화면이 아님'으로 봄 → 잘못 알면 교환 안 된 걸 됐다고 하므로 엄격하게:
+            # 아는 화면(박스·메뉴·확인·오류·로딩·GTS 화면 등)이 아닌 상태가 3초 넘게 이어지고 3장 이상, 마지막에 글을 읽어 통신 중·오류 문구가 없을 때
+            known = ["ph_send_menu", "ph_box_select", "ph_confirm_ok", "ph_dialog_close", "ph_no_result", "ph_error", "ph_other_device",
+                     "ph_popup", "ph_gts_main", "ph_trade_menu", "ph_room", "ph_form"]
             t0 = time.time(); seen = 0; img = None; since = None; started = False
             while time.time() - t0 < 20:
                 img = self.shot()
                 if self.dismiss_error(img):
                     raise FlowError("교환 버튼 뒤 통신 오류 창 → OK 누름 (교환 안 된 것으로 보고 다시 검색)", "")
-                n, *_ = V.find_any(img, ["ph_send_menu", "ph_box_select", "ph_confirm_ok", "ph_dialog_close", "ph_no_result"])
-                if n: seen = 0; since = None
+                n, *_ = V.find_any(img, known)
+                if n or self._is_loading(img) or (img is not None and img.size and float(img.std()) < 1.0):
+                    seen = 0; since = None
                 else:
                     seen += 1; since = since or time.time()
-                if seen >= 3 and time.time() - since >= 1.2:
-                    started = True; break
+                if seen >= 3 and time.time() - since >= 3.0:
+                    if self._busy_text(img):
+                        self.log("교환 버튼 뒤 '통신 중'·오류 문구가 보임 → 연출 시작으로 보지 않고 더 기다림")
+                        seen = 0; since = None
+                    else:
+                        started = True; break
                 time.sleep(0.1)
             if not started:
                 raise FlowError("교환 버튼 뒤 연출로 넘어가지 않음 (앱을 끄지 않고 둠)", self.save_shot(img if img is not None else self.shot(), "no_trade_anim"))
@@ -828,15 +757,3 @@ class Home:
             self.adb.text(s); return
         if not self.adb.ime_text(s):
             raise FlowError("한글 입력기(ADBKeyboard)가 준비되지 않았습니다")
-
-    # ---- 한글 입력 (adb input text는 한글 불가)
-    def _type_korean(self, s):
-        """1순위: 클립보드 앱(예: 'Clipper')에 넣고 붙여넣기. 2순위: 화면 자판 템플릿. 둘 다 준비 전이면 FlowError."""
-        try:
-            # adb shell am broadcast -a clipper.set -e text '...'  (Clipper 앱 설치 시)
-            self.adb.run("shell", "am", "broadcast", "-a", "clipper.set", "-e", "text", s)
-            self.adb.key(279)   # KEYCODE_PASTE
-            time.sleep(0.8)
-            return
-        except Exception:
-            raise FlowError("한글 입력 수단이 없습니다 (Clipper 앱 또는 자판 템플릿 필요)")
