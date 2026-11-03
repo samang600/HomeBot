@@ -1625,6 +1625,8 @@ public sealed class Orchestrator
 
     // ---------- 휴대폰 줄: HOME에 올라간 신청들을 돌아가며 한 번씩 검색 (먼저 맡긴 사람부터 교환됨)
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, (bool toldNone, bool toldMany, int errors, string shot)> ph = new();
+    /// <summary>교환 버튼은 눌렀는데 연출 시작을 확인 못 한 신청 → 시각. 실제로는 교환된 경우가 많음 (11-01~03: 이런 25건이 '못 찾음'으로 끝남)</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, DateTime> animUnsure = new();
     /// <summary>못 찾음 안내 DM 뒤 연속으로 못 찾은 횟수 / 다시 맡기기·취소 안내를 보낸 신청</summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, int> noneSinceDm = new();
     private readonly HashSet<long> toldRetry = new();
@@ -1729,7 +1731,10 @@ public sealed class Orchestrator
             db.EndTrade(db.AddTrade(o.Id, item?.Id, o.Route), "시간 초과", st.shot ?? "");
             if (item != null) db.Reserve(item.Id, null);
             log($"#{o.Id} 시간 초과 (GTS에서 못 찾음)");
-            await notify(o.DiscordId, $"⌛ #{o.Id} 시간 안에 GTS에서 맡긴 포켓몬(**{k.Ko()}**)을 찾지 못해 신청을 끝냈습니다. 맡긴 포켓몬은 GTS에서 회수하고 다시 신청해 주세요.");
+            if (animUnsure.TryRemove(o.Id, out _))
+                await notify(o.DiscordId, $"⌛ #{o.Id} 교환 버튼까지 눌렀지만 교환 화면을 확인하지 못한 채 시간이 끝났어요. **교환이 이미 됐을 수 있으니 HOME 박스를 먼저 확인해 주세요.** {o.Describe}이(가) 없고 GTS에 맡긴 포켓몬이 그대로 있으면 회수하고 다시 신청해 주세요.");
+            else
+                await notify(o.DiscordId, $"⌛ #{o.Id} 시간 안에 GTS에서 맡긴 포켓몬(**{k.Ko()}**)을 찾지 못해 신청을 끝냈습니다. 맡긴 포켓몬은 GTS에서 회수하고 다시 신청해 주세요.");
             ph.TryRemove(o.Id, out _); return;
         }
         PhoneState = $"#{o.Id} GTS에서 {k.Ko()} 찾는 중 (" + (Accounts > 1 ? $"#N{acct} " : "") + $"HOME 1-{item?.Slot + 1})";
@@ -1784,6 +1789,7 @@ public sealed class Orchestrator
                 await Task.Delay(5000, ct); return;
             }
             st.errors++; log($"#{o.Id} GTS 검색 오류: {r.Message}"); LastError = "GTS: " + r.Message; freshOf[acct] = true;
+            if (r.Message.Contains("연출로 넘어가지 않음")) animUnsure[o.Id] = DateTime.UtcNow;
             if (st.errors >= 3)
             {
                 if (!db.SetStatusIf(o.Id, OrderStatus.InHome, OrderStatus.Failed, error: "휴대폰 HOME 조작 오류")) { ph.TryRemove(o.Id, out _); return; }   // 그 사이 취소됨
@@ -1797,22 +1803,31 @@ public sealed class Orchestrator
             ph[o.Id] = st; return;
         }
         st.errors = 0;
-        bool tradedEarlier = false;
+        bool tradedEarlier = false, unsureDone = false;
         if (r.Vars.GetValueOrDefault("traded") != "1" && (int.TryParse(r.Vars.GetValueOrDefault("found"), out var f0) ? f0 : 0) == 0)
         {
             // 검색 결과가 없음: 봇이 교환 도중 꺼졌다 켜져서 교환은 끝났는데 결과를 못 받은 경우일 수 있음 → 워커 기록 확인
             try { tradedEarlier = await phone.TradedRecentlyAsync(k.NameEn, k.Level, k.Lang, k.SearchGender, nickArg, 40, ct, acct); } catch { }
             if (tradedEarlier) log($"#{o.Id} 검색 결과는 없지만 워커 기록에 교환 완료가 있음 → 완료 처리");
+            // 교환 버튼을 누른 뒤 연출 확인만 못 했고, 그 뒤 검색에서 맡긴 글이 사라짐 = 교환된 것 (안 됐으면 글이 그대로 남아 있음)
+            else if (animUnsure.TryGetValue(o.Id, out var au) && DateTime.UtcNow - au < TimeSpan.FromMinutes(20))
+            {
+                tradedEarlier = true; unsureDone = true;
+                log($"#{o.Id} 교환 연출은 확인 못 했지만 그 뒤 검색에서 맡긴 글이 사라짐 → 교환된 것으로 봄");
+            }
         }
         if (r.Vars.GetValueOrDefault("traded") == "1" || tradedEarlier)
         {
             db.EndTrade(db.AddTrade(o.Id, item?.Id, o.Route), "ok", st.shot ?? "");
             if (item != null) db.SetLocation(item.Id, Location.Gone, -1, -1);
             db.SetStatus(o.Id, OrderStatus.Done);
-            await notify(o.DiscordId, $"✅ #{o.Id} **{o.Describe}** 교환 완료! HOME 박스를 확인해 주세요. 이용해 주셔서 감사합니다");
+            await notify(o.DiscordId, $"✅ #{o.Id} **{o.Describe}** 교환 완료! HOME 박스를 확인해 주세요. 이용해 주셔서 감사합니다"
+                + (unsureDone ? "\n(교환 화면 확인이 늦어 확인이 조금 걸렸어요. 혹시 HOME 박스에 없으면 운영자에게 알려 주세요)" : ""));
+            animUnsure.TryRemove(o.Id, out _);
             log($"#{o.Id} 교환 완료"); ph.TryRemove(o.Id, out _); return;
         }
         int found = int.TryParse(r.Vars.GetValueOrDefault("found"), out var f) ? f : 0;
+        if (found > 0) animUnsure.TryRemove(o.Id, out _);   // 맡긴 글이 아직 있음 = 지난번 교환은 안 됨
         // 결과가 없으면(아직 안 맡김) 다음 1바퀴는 건너뜀, 두 번 넘게 없으면 2바퀴 — 맡긴 사람들을 먼저 처리
         if (found == 0)
         {

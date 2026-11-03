@@ -351,6 +351,15 @@ class Home:
         except Exception:
             return False
 
+    def _sending_text(self, img, force=False):
+        """교환 연출 아래 글 상자에 'Sending … to' / 'Good-bye' 가 있는지 (영어 HOME). 글 읽기는 무거워 호출하는 쪽이 1초에 한 번만."""
+        try:
+            if img is None or not img.size: return False
+            txt = V.ocr_text(img, (140, 1550, 800, 170), "ENG").lower()   # 글 상자 안쪽만 (상자 테두리까지 넣으면 못 읽음)
+        except Exception:
+            return False
+        return any(k in txt for k in ("sending", "good-bye", "goodbye", "good bye"))
+
     def _busy_text(self, img):
         """화면 가운데 글에 '통신 중'·'기다려'·오류 문구가 있는지 (교환 연출이 아니라 대기·오류 창). 글을 못 읽으면 False.
         글 읽기는 무거워서 0.5초에 한 번만 (그 사이에는 지난 결과)."""
@@ -689,13 +698,23 @@ class Home:
             # 아는 화면(박스·메뉴·확인·오류·로딩·GTS 화면 등)이 아닌 상태가 3초 넘게 이어지고 3장 이상, 마지막에 글을 읽어 통신 중·오류 문구가 없을 때
             known = ["ph_send_menu", "ph_box_select", "ph_confirm_ok", "ph_dialog_close", "ph_no_result", "ph_error", "ph_other_device",
                      "ph_popup", "ph_gts_main", "ph_trade_menu", "ph_room", "ph_form"]
-            t0 = time.time(); seen = 0; img = None; since = None; started = False
-            while time.time() - t0 < 20:
+            t0 = time.time(); seen = 0; img = None; since = None; started = False; t_sent = 0.0
+            # 기본 20초, 그때 아는 화면이 아닌 화면(연출로 보이는 것)이 보이는 중이면 45초까지 더 봄
+            # (11-01~03: '통신 중'이 길어 연출이 20초 뒤에 시작돼 'Sending … Good-bye' 화면에서 실패 처리 → 교환은 됐는데 '못 찾음'으로 끝난 25건)
+            while time.time() - t0 < 20 or (seen > 0 and time.time() - t0 < 45):
                 img = self.shot()
                 if self.dismiss_error(img):
                     raise FlowError("교환 버튼 뒤 통신 오류 창 → OK 누름 (교환 안 된 것으로 보고 다시 검색)", "")
+                if time.time() - t_sent > 1.0:
+                    t_sent = time.time()
+                    if self._sending_text(img):                  # 아래 글 상자 'Sending ○○ to … / Good-bye, ○○!' = 교환 연출이 확실히 시작됨
+                        self.log("교환 연출 글('Sending … Good-bye') 확인")
+                        started = True; break
                 n, *_ = V.find_any(img, known)
-                if n or self._is_loading(img) or (img is not None and img.size and float(img.std()) < 1.0):
+                flat = img is not None and img.size and float(img.std()) < 1.0
+                if flat and seen > 0:
+                    pass                                         # 연출 중 흰색·검은색으로 번쩍이는 화면: 세던 것을 지우지 않음
+                elif n or self._is_loading(img) or flat:
                     seen = 0; since = None
                 else:
                     seen += 1; since = since or time.time()
@@ -706,6 +725,8 @@ class Home:
                     else:
                         started = True; break
                 time.sleep(0.1)
+            if not started and img is not None and self._sending_text(img, force=True):
+                self.log("시간이 지났지만 마지막 화면이 교환 연출 글 → 교환된 것으로 봄"); started = True
             if not started:
                 raise FlowError("교환 버튼 뒤 연출로 넘어가지 않음 (앱을 끄지 않고 둠)", self.save_shot(img if img is not None else self.shot(), "no_trade_anim"))
             anim = self.save_shot(img, "trade_anim")       # 나중에 확인용 (연출 화면이 맞는지)
