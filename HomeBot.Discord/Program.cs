@@ -236,13 +236,22 @@ async Task<Embed> CardEmbed(Order o, PKHeX.Core.PKM pk, IUser who)
         .WithFooter($"준비 중 · 대기 순서 {db.QueuePosition(o.Id)}번" + (orch.EtaText(o.Id) is { Length: > 0 } eta ? $" · {eta}" : "") + $" · 어버이: {c.OT} | TID: {c.TID:D6} | SID: {c.SID:D4} · HomeBot");
     return e.Build();
 }
+// 공개 카드 숨기기: 신청할 때 /교환 비공개:True 로 고른 값(card_private_order:<번호>)이 우선, 없으면 서버 기본(card_private)
+bool CardPrivate(long orderId) => db.Get($"card_private_order:{orderId}") is { Length: > 0 } v ? v == "1" : db.Get("card_private") == "1";
 orch.OnCard = async (o, pk) =>
 {
     try
     {
         var who = await client.GetUserAsync(o.DiscordId);
         var embed = await CardEmbed(o, pk, who);
-        if (o.ChannelId != 0 && await client.GetChannelAsync(o.ChannelId) is IMessageChannel ch) await ch.SendMessageAsync(text: $"<@{o.DiscordId}> 포켓몬을 만들었어요! 지금 HOME으로 옮길 준비 중이에요" + (orch.EtaTurn(o.Id) is { } t && t > TimeSpan.Zero ? $" (교환 차례까지 {Orchestrator.Dur(t)})" : "") + ". 교환 차례가 되면 DM으로 알려 드릴게요 ⏳", embed: embed);
+        // 비공개 카드: 신청 채널에는 멘션과 '만들었어요' 글만, 포켓몬 정보 카드는 본인 DM으로 (/교환 비공개:True 또는 운영자 card_private:on)
+        bool priv = CardPrivate(o.Id);
+        var text = $"<@{o.DiscordId}> 포켓몬을 만들었어요! 지금 HOME으로 옮길 준비 중이에요" + (orch.EtaTurn(o.Id) is { } t && t > TimeSpan.Zero ? $" (교환 차례까지 {Orchestrator.Dur(t)})" : "") + ". 교환 차례가 되면 DM으로 알려 드릴게요 ⏳";
+        if (o.ChannelId != 0 && await client.GetChannelAsync(o.ChannelId) is IMessageChannel ch)
+        {
+            if (!priv) await ch.SendMessageAsync(text: text, embed: embed);
+            else { await ch.SendMessageAsync(text: text + " (포켓몬 정보는 DM으로 보냈어요 🔒)"); if (who != null) try { await who.SendMessageAsync(embed: embed); } catch { } }
+        }
         else if (who != null) await who.SendMessageAsync(embed: embed);
     }
     catch (Exception ex) { Log("카드 보내기 실패: " + ex.Message); }
@@ -256,7 +265,7 @@ const string Help = """
    • GTS에 올릴 포켓몬: 내가 GTS에 맡길 아무 포켓몬의 이름·레벨·성별·언어
 2. HOME → 교환 → GTS → **포켓몬을 맡긴다** 로 그 포켓몬을 맡기고, 원하는 포켓몬을 **신청한 포켓몬**으로 설정 (성별·레벨은 봇이 차례 알림 DM에서 알려 주는 대로 — '상관없음'으로 두면 다른 사람이 가로챌 수 있어요)
 3. 차례가 되면 봇이 GTS에서 맡긴 포켓몬을 찾아 교환합니다. 진행 상황은 DM으로 알려 드려요.
-`/해석` 문장이 어떻게 읽히는지 · `/대기열` 내 신청 · `/전체대기열` · `/취소`
+`/해석` 문장이 어떻게 읽히는지 · `/대기열` 내 신청 · `/전체대기열` · `/취소` · `/교환 비공개:True` 로 신청하면 만든 포켓몬 정보를 채널 대신 DM으로만
 """;
 
 client.Log += m => { Log("[Discord] " + m); return Task.CompletedTask; };
@@ -268,7 +277,8 @@ client.Ready += async () =>
     var cmds = new List<ApplicationCommandProperties>
     {
         new SlashCommandBuilder().WithName("교환").WithDescription("포켓몬 신청 (문장·쇼다운 세트·파일) → HOME GTS로 받기")
-            .AddOption("파일", ApplicationCommandOptionType.Attachment, "포켓몬 파일 (.pk9 .pb8 .pk8 등, 선택)", false).Build(),
+            .AddOption("파일", ApplicationCommandOptionType.Attachment, "포켓몬 파일 (.pk9 .pb8 .pk8 등, 선택)", false)
+            .AddOption("비공개", ApplicationCommandOptionType.Boolean, "켜면 만든 포켓몬 정보를 채널에 올리지 않고 DM으로만 (채널엔 멘션과 '만들었어요'만)", false).Build(),
         new SlashCommandBuilder().WithName("해석").WithDescription("신청 문장/세트가 어떻게 해석되는지만 보기").AddOption("신청", ApplicationCommandOptionType.String, "신청 문장", true).Build(),
         new SlashCommandBuilder().WithName("대기열").WithDescription("내 신청 상태").Build(),
         new SlashCommandBuilder().WithName("전체대기열").WithDescription("지금 대기 중인 신청 목록").Build(),
@@ -293,6 +303,7 @@ client.Ready += async () =>
 
 bool IsAdmin(ulong id) => cfg.Discord.AdminIds.Contains(id);
 var pendingFiles = new System.Collections.Concurrent.ConcurrentDictionary<string, IAttachment>();
+var pendingPrivate = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();   // /교환 비공개 옵션 (신청 창을 닫을 때까지)
 
 Modal KeyModal(string id)
 {
@@ -452,6 +463,7 @@ Func<SocketSlashCommand, Task> onSlash = async c =>
                 if (orch.GameGate(GameOfChannel(c.ChannelId ?? 0)) is { } closed) { await R("⏳ " + closed); break; }
                 var id = "order:" + Guid.NewGuid().ToString("N")[..12];
                 if (att != null) pendingFiles[id] = att;
+                if (c.Data.Options.FirstOrDefault(o => o.Name == "비공개")?.Value is bool pv) pendingPrivate[id] = pv;
                 await c.RespondWithModalAsync(OrderModal(id, att != null)); break;
             }
             case "해석": { var (_, pv, pb) = orch.PreviewFor(Opt("신청"), GameOfChannel(c.ChannelId ?? 0)); await R(pb ?? pv); break; }
@@ -529,7 +541,8 @@ Func<SocketModal, Task> onModal = async m =>
             text = GenService.WithTrainer(text, GenService.LooksShowdown(text), ot, tid, sid);
             r = await orch.SubmitAsync(m.User.Id, text, kp, ch, GameOfChannel(ch));
         }
-        await m.FollowupAsync((r.ok ? "✅ " : "❌ ") + r.msg, ephemeral: true);
+        if (pendingPrivate.TryRemove(m.Data.CustomId, out var pv2) && r.ok && r.id > 0) db.Set($"card_private_order:{r.id}", pv2 ? "1" : "0");
+        await m.FollowupAsync((r.ok ? "✅ " : "❌ ") + r.msg + (r.ok && CardPrivate(r.id) ? "\n🔒 비공개 신청: 만든 포켓몬 정보는 DM으로만 보내요" : ""), ephemeral: true);
     }
     catch (Exception ex) { Log("신청 창 오류: " + ex); try { await m.FollowupAsync("오류: " + ex.Message, ephemeral: true); } catch { } }
 };
@@ -605,6 +618,7 @@ _ = Task.Run(async () =>
                     else if (p[0] == "cancelmsg" && p.Length >= 3 && long.TryParse(p[1], out var cmid)) res = await orch.AdminCancelAsync(cmid, c.Split(':', 3)[2]);
                     else if (c.StartsWith("bdsp_sent")) res = orch.AdminBdspSent(c.Length > 10 ? c[10..] : "");
                     else if (c is "bdsp_legend:on" or "bdsp_legend:off") { orch.BdspLegendBlock = c.EndsWith("on"); res = orch.BdspLegendBlock ? "브다샤펄 전설·준전설·환상 신청 받지 않음" : "브다샤펄 전설·준전설·환상 신청 다시 받음 (종마다 한 번 규칙만)"; }   // bdsp_sent · bdsp_sent:디아루가:이로치 · bdsp_sent:-디아루가 · bdsp_sent:clear
+                    else if (c is "card_private:on" or "card_private:off") { db.Set("card_private", c.EndsWith("on") ? "1" : "0"); res = c.EndsWith("on") ? "공개 카드 기본값: 비공개 (멘션·글만, 정보는 DM)" : "공개 카드 기본값: 공개"; }
                     else if (c == "clear") res = await orch.ClearQueueAsync(false);
                     else if (c == "clear_all") res = await orch.ClearQueueAsync(true);
                     else if (c.StartsWith("announce:"))
@@ -1004,12 +1018,13 @@ static string GuiRestart(string dataDir)
 Start-Transcript -Path (Join-Path $PSScriptRoot 'gui_restart.log') -Force | Out-Null
 Start-Sleep -Seconds 2
 $all = Get-CimInstance Win32_Process
-$gui = $all | Where-Object { $_.CommandLine -like '*manager.pyw*' } | Select-Object -First 1
+$guis = @($all | Where-Object { $_.CommandLine -like '*manager.pyw*' })
+$gui = $guis | Select-Object -First 1
 if (-not $gui) { "관리 창을 찾지 못함"; exit 1 }
 $exe = $gui.ExecutablePath
 $m = [regex]::Match($gui.CommandLine, '([A-Za-z]:\\[^"]*?manager\.pyw)')
 $pyw = $m.Groups[1].Value
-taskkill /PID $gui.ProcessId /T /F | Out-Null
+foreach ($g in $guis) { taskkill /PID $g.ProcessId /T /F | Out-Null }   # 관리 창이 둘이면 봇도 둘이 뜸
 Start-Sleep -Seconds 1
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*phone_worker*server.py*' -or $_.CommandLine -like '*HomeBot.Discord*' } | ForEach-Object { taskkill /PID $_.ProcessId /T /F | Out-Null }
 Start-Sleep -Seconds 2
